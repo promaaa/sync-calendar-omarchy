@@ -16,6 +16,7 @@ import calendar
 import urllib.request
 import urllib.parse
 import urllib.error
+import base64
 from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
@@ -973,6 +974,18 @@ def fetch_calendar(cal_info, window_start, window_end):
     name = cal_info.get("name", "Calendar")
     raw_url = cal_info.get("url", "").strip()
 
+    username = cal_info.get("username")
+    password = cal_info.get("password")
+
+    headers = {
+        "User-Agent": USER_AGENT
+    }
+
+    if username and password:
+        auth_str = f"{username}:{password}"
+        auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+        headers["Authorization"] = f"Basic {auth_b64}"
+
     if not raw_url:
         return {"name": name, "color": cal_info.get("color", "#4A90E2"), "events": [], "status": "no_url", "count": 0}
 
@@ -996,7 +1009,7 @@ def fetch_calendar(cal_info, window_start, window_end):
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 content = safe_read_text(f, max_bytes=MAX_ICAL_BYTES)
         else:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=12) as resp:
                 raw = safe_read_bytes(resp, max_bytes=MAX_ICAL_BYTES)
                 content = raw.decode("utf-8", errors="ignore")

@@ -22,12 +22,16 @@ BarWidget {
   readonly property string configuredAltFormat: vertical
     ? setting("verticalFormatAlt", "dd\nMMM\n'W'ww\n''yy")
     : setting("formatAlt", "d MMMM 'W'ww yyyy")
+  readonly property int clockHourCycle: Model.normalizedHourCycle(setting(
+    "clockHourCycle",
+    Model.hourCycleForClockFormat(configuredFormat, 24)
+  ))
 
   readonly property var formatRing: Model.clockFormatRing(configuredFormat, configuredAltFormat, Model.clockFormats(vertical))
 
   // What the bar shows is what shell.json stores, so a cycled format is the
   // format from then on rather than something that reverts on restart.
-  readonly property string activeFormat: configuredFormat
+  readonly property string activeFormat: Model.clockFormatForHourCycle(configuredFormat, clockHourCycle)
   readonly property string displayText: formatted(displayDate)
   readonly property var verticalLines: displayText.split("\n")
 
@@ -44,6 +48,7 @@ BarWidget {
     var entry = { id: root.moduleName }
     for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
     entry[vertical ? "verticalFormat" : "format"] = next
+    entry.clockHourCycle = Model.hourCycleForClockFormat(next, root.clockHourCycle)
 
     // Applied locally first so the label changes on the click itself; the
     // shell.json write comes back through the bar as the same value.

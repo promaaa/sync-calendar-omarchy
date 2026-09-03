@@ -39,6 +39,55 @@ var VERTICAL_CLOCK_FORMATS = [
   "HH\nmm"
 ]
 
+// Matching 24-hour and 12-hour versions of every time-bearing preset. Keeping
+// this mapping separate from the format ring lets Preferences change only the
+// hour cycle without discarding the user's chosen date/layout variant.
+var CLOCK_FORMAT_PAIRS = [
+  ["dddd HH:mm", "dddd h:mm AP"],
+  ["HH:mm", "h:mm AP"],
+  ["ddd d MMM HH:mm", "ddd d MMM h:mm AP"],
+  ["yyyy-MM-dd HH:mm", "yyyy-MM-dd h:mm AP"],
+  ["HH\n—\nmm", "h\n—\nmm\nAP"],
+  ["HH\nmm", "h\nmm\nAP"]
+]
+
+function normalizedHourCycle(value) {
+  var text = String(value === undefined || value === null ? "" : value).toLowerCase()
+  return text === "12" || text === "12h" || text === "12-hour" ? 12 : 24
+}
+
+function clockFormatForHourCycle(format, hourCycle) {
+  var current = String(format === undefined || format === null ? "" : format)
+  var targetIndex = normalizedHourCycle(hourCycle) === 12 ? 1 : 0
+  for (var i = 0; i < CLOCK_FORMAT_PAIRS.length; i++) {
+    if (CLOCK_FORMAT_PAIRS[i][0] === current || CLOCK_FORMAT_PAIRS[i][1] === current)
+      return CLOCK_FORMAT_PAIRS[i][targetIndex]
+  }
+  return current
+}
+
+function hourCycleForClockFormat(format, fallback) {
+  var current = String(format === undefined || format === null ? "" : format)
+  for (var i = 0; i < CLOCK_FORMAT_PAIRS.length; i++) {
+    if (CLOCK_FORMAT_PAIRS[i][0] === current) return 24
+    if (CLOCK_FORMAT_PAIRS[i][1] === current) return 12
+  }
+  return normalizedHourCycle(fallback)
+}
+
+// Synced events are stored as sortable 24-hour HH:mm strings. Format them at
+// the presentation boundary so changing this preference never requires a
+// calendar refresh or mutates the cache.
+function formatEventTime(value, hourCycle) {
+  var text = String(value === undefined || value === null ? "" : value)
+  if (normalizedHourCycle(hourCycle) !== 12) return text
+  var match = /^(\d{1,2}):(\d{2})$/.exec(text)
+  if (!match) return text
+  var hour = parseInt(match[1], 10)
+  if (hour < 0 || hour > 23) return text
+  return String(hour % 12 || 12) + ":" + match[2] + (hour < 12 ? " AM" : " PM")
+}
+
 function clockFormats(vertical) {
   return vertical ? VERTICAL_CLOCK_FORMATS.slice() : CLOCK_FORMATS.slice()
 }
@@ -328,7 +377,7 @@ function parseCalendarsConfig(text) {
   }
 }
 
-function formatAgendaMarkdown(events, selectedDateLabel, calendarName) {
+function formatAgendaMarkdown(events, selectedDateLabel, calendarName, hourCycle) {
   if (!events || events.length === 0) return ""
   var header = "### Agenda – " + (selectedDateLabel || "Today")
   if (calendarName && calendarName !== "all") {
@@ -338,7 +387,9 @@ function formatAgendaMarkdown(events, selectedDateLabel, calendarName) {
   for (var i = 0; i < events.length; i++) {
     var evt = events[i]
     if (!evt) continue
-    var timeStr = evt.allDay ? "All Day" : (evt.startTime + (evt.endTime ? " – " + evt.endTime : ""))
+    var startTime = formatEventTime(evt.startTime, hourCycle)
+    var endTime = formatEventTime(evt.endTime, hourCycle)
+    var timeStr = evt.allDay ? "All Day" : (startTime + (endTime ? " – " + endTime : ""))
     var line = "- [ ] " + timeStr + " · " + (evt.title || "Untitled Event")
     if (evt.meetingProvider && evt.meetingUrl) {
       line += " ([" + evt.meetingProvider + "](" + evt.meetingUrl + "))"
@@ -433,6 +484,10 @@ if (typeof module !== "undefined") {
     clockFormats: clockFormats,
     clockFormatRing: clockFormatRing,
     nextClockFormat: nextClockFormat,
+    normalizedHourCycle: normalizedHourCycle,
+    clockFormatForHourCycle: clockFormatForHourCycle,
+    hourCycleForClockFormat: hourCycleForClockFormat,
+    formatEventTime: formatEventTime,
     isoWeekLiteral: isoWeekLiteral,
     parseEventsFile: parseEventsFile,
     formatSelectedDateLabel: formatSelectedDateLabel,

@@ -1,6 +1,6 @@
-# Calendar Sync for Omarchy
+# Calendar Sync for Omarchy and Shibumi
 
-A fast, lightweight calendar and clock status bar plugin for Omarchy that syncs Google Calendar, Apple iCloud, Proton Calendar, Microsoft Outlook, Fastmail (JMAP / iCal), Nextcloud, Stalwart, and generic iCalendar (.ics / webcal) feeds directly into your desktop.
+A fast, lightweight calendar and clock status bar plugin for Omarchy's stock bar and Shibumi Shell that syncs Google Calendar, Apple iCloud, Proton Calendar, Microsoft Outlook, Fastmail (JMAP / iCal), Nextcloud, Stalwart, and generic iCalendar (.ics / webcal) feeds directly into your desktop.
 
 ![GitHub stars](https://img.shields.io/github/stars/promaaa/sync-calendar-omarchy?style=flat-square)
 ![License](https://img.shields.io/github/license/promaaa/sync-calendar-omarchy?style=flat-square)
@@ -24,9 +24,10 @@ A fast, lightweight calendar and clock status bar plugin for Omarchy that syncs 
 - **Copy Agenda as Markdown**: 1-click clipboard export (`󰆏` button or `y` hotkey) to format your daily schedule into clean Markdown tasks for standups, Slack, or Obsidian.
 - **Quick-Toggle Calendar Filter Chips**: Fast single-click filter pills in the agenda header to isolate or show specific calendars on the fly.
 - **Configurable Auto-Sync & Instant Refresh**: Customizable background sync intervals (5m, 15m, 30m, 60m, or manual) plus an instant sync button with real-time status.
-- **Seamless Theming**: Dynamically inherits your active Omarchy theme colors, fonts, and styling.
+- **Seamless Theming**: Dynamically inherits the active Omarchy or Shibumi bar colors, fonts, and styling.
 - **Multi-Calendar Sync**: Connect multiple calendar accounts and feeds with customizable per-calendar colors and easy enable/disable toggles.
 - **Interactive Month Grid**: Click any date to view scheduled events for that day.
+- **12/24-Hour Time Preference**: Switch the clock, agenda, notifications, and copied agenda times between 12-hour and 24-hour display.
 - **Visual Event Indicators**: Days with events show subtle colored dots corresponding to the calendar source.
 - **Fast & Non-Blocking**: Background multi-threaded event fetcher with zero UI freezes.
 - **Recurring & Multi-Day Events**: Full support for daily, weekly, monthly, and yearly recurring events (`RRULE` / `EXDATE`) and multi-day spans.
@@ -45,6 +46,8 @@ A fast, lightweight calendar and clock status bar plugin for Omarchy that syncs 
 
 ## Installation
 
+### Stock Omarchy bar
+
 Install with the Omarchy CLI:
 
 ```bash
@@ -60,12 +63,29 @@ omarchy bar move promaa.clock --section center
 sed -i 's/"centerAnchor": "[^"]*"/"centerAnchor": "promaa.clock"/' ~/.config/omarchy/shell.json
 ```
 
-### Via GUI
+#### Via GUI
 
 1. Open the Omarchy menu (**Super + Alt + Space**).
 2. Go to **Install > Plugins**.
 3. Paste the repository URL: `https://github.com/promaaa/sync-calendar-omarchy.git`
 4. Hit Enter.
+
+### Shibumi Shell
+
+This plugin implements Shibumi's standard Quattro widget and `KeyboardPanel`
+contracts. Its manifest also declares the `clock` semantic capability, so
+Shibumi treats it as a clock provider: activating it places it in the center
+region and replaces the built-in **Shibumi Center** group instead of showing a
+duplicate clock.
+
+1. Open the Shibumi Control Center from the Shibumi wordmark.
+2. Open **Plugins** and select **Add plugin**.
+3. Paste `https://github.com/promaaa/sync-calendar-omarchy.git`.
+4. Acknowledge the third-party plugin warning, install it, and activate
+   **Calendar Sync Clock** in the plugin catalog.
+
+The calendar configuration and cached event paths remain under Omarchy's XDG
+directories because Shibumi runs inside the existing Omarchy Shell process.
 
 ## Configuration
 

@@ -43,6 +43,10 @@ Panel {
   readonly property var notifyMinutesBefore: root.setting("notifyMinutesBefore", "staged")
   readonly property int syncIntervalMinutes: root.setting("syncIntervalMinutes", 15)
   readonly property bool enableMeetingLinks: root.setting("enableMeetingLinks", true)
+  readonly property int clockHourCycle: Model.normalizedHourCycle(root.setting(
+    "clockHourCycle",
+    Model.hourCycleForClockFormat(root.setting("format", "dddd HH:mm"), 24)
+  ))
   property var notifiedEventKeys: ({})
 
   // ---- Calendar Filtering & Agenda Markdown Copy
@@ -392,7 +396,7 @@ Panel {
           var titleStr = stagePrefix + evt.title
           var bodyParts = []
           if (evt.calendar) bodyParts.push("[" + evt.calendar + "]")
-          if (evt.startTime) bodyParts.push(evt.startTime + (evt.endTime ? " - " + evt.endTime : ""))
+          if (evt.startTime) bodyParts.push(root.eventTimeRange(evt, " - "))
           if (evt.meetingProvider) bodyParts.push("📹 " + evt.meetingProvider)
           else if (evt.location) bodyParts.push("📍 " + evt.location)
           var bodyStr = bodyParts.join("  ·  ")
@@ -406,7 +410,7 @@ Panel {
   function copyAgendaMarkdown() {
     var events = root.displayedEvents
     if (!events || events.length === 0) return
-    var md = Model.formatAgendaMarkdown(events, root.selectedDateLabel, root.activeCalendarFilter)
+    var md = Model.formatAgendaMarkdown(events, root.selectedDateLabel, root.activeCalendarFilter, root.clockHourCycle)
     if (!md) return
 
     copyProc.command = ["sh", "-c", "printf '%s' \"$1\" | (wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null)", "--", md]
@@ -480,6 +484,23 @@ Panel {
     if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  function setClockHourCycle(hourCycle) {
+    var cycle = Model.normalizedHourCycle(hourCycle)
+    if (cycle === root.clockHourCycle) return
+    persistSettings({
+      clockHourCycle: cycle,
+      format: Model.clockFormatForHourCycle(root.setting("format", "dddd HH:mm"), cycle),
+      verticalFormat: Model.clockFormatForHourCycle(root.setting("verticalFormat", "HH\n—\nmm"), cycle)
+    })
+  }
+
+  function eventTimeRange(event, separator) {
+    if (!event) return ""
+    var start = Model.formatEventTime(event.startTime, root.clockHourCycle)
+    var end = Model.formatEventTime(event.endTime, root.clockHourCycle)
+    return start + (end ? (separator || " – ") + end : "")
   }
 
   function setWeekStart(day) {
@@ -1906,7 +1927,7 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: modelData.allDay ? "ALL DAY" : (modelData.startTime + (modelData.endTime ? " – " + modelData.endTime : ""))
+                        text: modelData.allDay ? "ALL DAY" : root.eventTimeRange(modelData, " – ")
                         color: Qt.darker(root.contentForeground, 1.4)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -2735,7 +2756,90 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            // 1. Auto-Sync Interval Card
+            // 1. Clock Format Card
+            Rectangle {
+              width: parent.width
+              height: Style.space(60)
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.contentForeground, Color.accent)
+              border.width: Style.spacing.hairline
+              border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+
+              Item {
+                anchors.fill: parent
+                anchors.margins: Style.space(12)
+
+                Column {
+                  anchors.left: parent.left
+                  anchors.right: clockFormatPills.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Clock Format"
+                    color: root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Choose a 12-hour or 24-hour clock"
+                    color: Qt.darker(root.contentForeground, 1.8)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Row {
+                  id: clockFormatPills
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+
+                  Repeater {
+                    model: [
+                      { label: "12-hour", value: 12 },
+                      { label: "24-hour", value: 24 }
+                    ]
+
+                    Rectangle {
+                      id: clockFormatPill
+                      required property var modelData
+                      readonly property bool isSelected: root.clockHourCycle === modelData.value
+                      width: clockFormatText.implicitWidth + Style.space(14)
+                      height: Style.space(22)
+                      radius: Style.cornerRadius > 0 ? height / 2 : 0
+                      color: isSelected ? Color.accent : "transparent"
+                      border.width: 1
+                      border.color: isSelected ? Color.accent : Qt.darker(root.contentForeground, 1.8)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: clockFormatText
+                        anchors.centerIn: parent
+                        text: clockFormatPill.modelData.label
+                        color: clockFormatPill.isSelected ? Color.background : root.contentForeground
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: clockFormatPill.isSelected
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setClockHourCycle(clockFormatPill.modelData.value)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // 2. Auto-Sync Interval Card
             Rectangle {
               width: parent.width
               height: Style.space(76)
@@ -2816,7 +2920,7 @@ Panel {
               }
             }
 
-            // 2. Desktop Notifications Card
+            // 3. Desktop Notifications Card
             Rectangle {
               width: parent.width
               height: root.notifyUpcomingEvents ? Style.space(88) : Style.space(60)
@@ -2927,7 +3031,7 @@ Panel {
               }
             }
 
-            // 3. 1-Click Meeting Join Integration Card
+            // 4. 1-Click Meeting Join Integration Card
             Rectangle {
               width: parent.width
               height: Style.space(60)
@@ -2977,7 +3081,7 @@ Panel {
               }
             }
 
-            // 4. Calendar Week Start Card
+            // 5. Calendar Week Start Card
             Rectangle {
               width: parent.width
               height: Style.space(60)
@@ -3083,5 +3187,3 @@ Panel {
   }
 }
 }
-
-

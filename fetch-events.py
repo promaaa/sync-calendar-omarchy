@@ -388,6 +388,8 @@ def parse_datetime_value(val_str, params=None):
 
     # Try datetime formats: 20260816T143000Z or 20260816T143000
     cleaned = re.sub(r"[+-]\d\d:?\d\d$", "", val_str).rstrip("Z")
+    # Strip subsecond fractions if present (e.g. .000 or .123456)
+    cleaned = re.sub(r"\.\d+", "", cleaned)
     for fmt in (
         "%Y%m%dT%H%M%S", "%Y%m%dT%H%M",
         "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
@@ -414,6 +416,20 @@ def parse_datetime_value(val_str, params=None):
         return True, datetime(d.year, d.month, d.day, 0, 0, 0)
     except Exception:
         return True, datetime.now()
+
+
+def safe_int_param(val, default=1):
+    """Safely extract an integer from a parameter string or integer without throwing."""
+    if val is None:
+        return default
+    try:
+        cleaned = str(val).strip()
+        m = re.match(r"^[+-]?\d+", cleaned)
+        if m:
+            return int(m.group(0))
+        return default
+    except (ValueError, TypeError):
+        return default
 
 
 def parse_rrule(rrule_str):
@@ -557,7 +573,7 @@ def expand_weekly(event, window_start, window_end, rrule, until_dt, max_count):
     start_dt = event["start_dt"]
     end_dt = event["end_dt"]
     duration = end_dt - start_dt
-    interval = max(1, int(rrule.get("INTERVAL", 1)))
+    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
     byday_str = rrule.get("BYDAY", "")
     wkst_str = rrule.get("WKST", "MO").upper()
     wkst_idx = WEEKDAYS.index(wkst_str) if wkst_str in WEEKDAYS else 0
@@ -628,7 +644,7 @@ def expand_daily(event, window_start, window_end, rrule, until_dt, max_count):
     start_dt = event["start_dt"]
     end_dt = event["end_dt"]
     duration = end_dt - start_dt
-    interval = max(1, int(rrule.get("INTERVAL", 1)))
+    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
     byday_str = rrule.get("BYDAY", "")
 
     target_weekdays = None
@@ -680,7 +696,7 @@ def expand_monthly(event, window_start, window_end, rrule, until_dt, max_count):
     start_dt = event["start_dt"]
     end_dt = event["end_dt"]
     duration = end_dt - start_dt
-    interval = max(1, int(rrule.get("INTERVAL", 1)))
+    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
     exdates = set(event.get("exdates", []))
 
     instances = []
@@ -730,7 +746,7 @@ def expand_yearly(event, window_start, window_end, rrule, until_dt, max_count):
     start_dt = event["start_dt"]
     end_dt = event["end_dt"]
     duration = end_dt - start_dt
-    interval = max(1, int(rrule.get("INTERVAL", 1)))
+    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
     exdates = set(event.get("exdates", []))
     bymonth_str = rrule.get("BYMONTH", "")
 
@@ -808,7 +824,7 @@ def expand_recurring_event(event, window_start, window_end):
         if until_dt < window_start:
             return []
 
-    max_count = min(int(count_str) if count_str and count_str.isdigit() else 1000, 1000)
+    max_count = min(safe_int_param(count_str, 1000), 1000)
 
     start_dt = event["start_dt"]
     if freq == "WEEKLY":
@@ -1202,9 +1218,24 @@ def fetch_calendar(cal_info, window_start, window_end):
                 content = safe_read_text(f, max_bytes=MAX_ICAL_BYTES)
         else:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                raw = safe_read_bytes(resp, max_bytes=MAX_ICAL_BYTES)
-                content = raw.decode("utf-8", errors="ignore")
+            resp_content = None
+            last_error = None
+            # Retry transient connection resets / throttling (common on Apple iCloud CalDAV)
+            for attempt in range(2):
+                try:
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        raw = safe_read_bytes(resp, max_bytes=MAX_ICAL_BYTES)
+                        resp_content = raw.decode("utf-8", errors="ignore")
+                    break
+                except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ConnectionError) as exc:
+                    last_error = exc
+                    if attempt == 0:
+                        time.sleep(0.5)
+                        continue
+                    raise
+            if resp_content is None and last_error:
+                raise last_error
+            content = resp_content or ""
 
         events = parse_ics(content, cal_info, window_start, window_end)
         return {
@@ -1700,73 +1731,84 @@ def fetch_local_calendar(cal_info, window_start, window_end):
     """Fetch events stored locally in ~/.local/state/omarchy/local-events.json"""
     name = cal_info.get("name", "Local Calendar")
     color = cal_info.get("color", "#a6e3a1")
-    raw_events = safe_load_json(LOCAL_EVENTS_PATH, max_bytes=MAX_OUTPUT_JSON_BYTES) or []
-    if not isinstance(raw_events, list):
-        raw_events = []
+    try:
+        raw_events = safe_load_json(LOCAL_EVENTS_PATH, max_bytes=MAX_OUTPUT_JSON_BYTES) or []
+        if not isinstance(raw_events, list):
+            raw_events = []
 
-    auto_translate = cal_info.get("translateKorean", False)
-    events = []
+        auto_translate = cal_info.get("translateKorean", False)
+        events = []
 
-    for item in raw_events:
-        title = item.get("title") or "(Untitled Event)"
-        description = item.get("description") or ""
-        location = item.get("location") or ""
-        all_day = bool(item.get("allDay", False))
+        for item in raw_events:
+            title = item.get("title") or "(Untitled Event)"
+            description = item.get("description") or ""
+            location = item.get("location") or ""
+            all_day = bool(item.get("allDay", False))
 
-        if auto_translate:
-            title = translate_korean_to_english(title)
-            location = translate_korean_to_english(location)
+            if auto_translate:
+                title = translate_korean_to_english(title)
+                location = translate_korean_to_english(location)
 
-        meeting_url, meeting_provider = extract_meeting_info(location, description, title)
+            meeting_url, meeting_provider = extract_meeting_info(location, description, title)
 
-        start_str = item.get("start")
-        if not start_str:
-            continue
+            start_str = item.get("start")
+            if not start_str:
+                continue
 
-        start_dt = parse_iso_or_local(start_str)
-        end_str = item.get("end")
-        if end_str:
-            end_dt = parse_iso_or_local(end_str)
-        elif all_day:
-            end_dt = start_dt + timedelta(days=1)
-        else:
-            end_dt = start_dt + timedelta(hours=1)
+            start_dt = parse_iso_or_local(start_str)
+            end_str = item.get("end")
+            if end_str:
+                end_dt = parse_iso_or_local(end_str)
+            elif all_day:
+                end_dt = start_dt + timedelta(days=1)
+            else:
+                end_dt = start_dt + timedelta(hours=1)
 
-        evt = {
-            "id": str(item.get("id", f"local_{int(start_dt.timestamp())}")),
-            "title": title,
-            "location": location,
-            "description": description,
-            "calendar": name,
-            "calendarId": "local",
-            "calendarType": "local",
-            "writable": True,
+            evt = {
+                "id": str(item.get("id", f"local_{int(start_dt.timestamp())}")),
+                "title": title,
+                "location": location,
+                "description": description,
+                "calendar": name,
+                "calendarId": "local",
+                "calendarType": "local",
+                "writable": True,
+                "color": color,
+                "all_day": all_day,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "date_key": start_dt.strftime("%Y-%m-%d"),
+                "meetingUrl": meeting_url or "",
+                "meetingProvider": meeting_provider or "",
+                "rrule": None,
+                "exdates": [],
+            }
+
+            multidays = expand_multiday_event(evt, window_start, window_end)
+            for inst in multidays:
+                inst_dt = datetime.strptime(inst["date_key"], "%Y-%m-%d")
+                if window_start <= inst_dt <= window_end:
+                    events.append(inst)
+
+        return {
+            "name": name,
             "color": color,
-            "all_day": all_day,
-            "start_dt": start_dt,
-            "end_dt": end_dt,
-            "date_key": start_dt.strftime("%Y-%m-%d"),
-            "meetingUrl": meeting_url or "",
-            "meetingProvider": meeting_provider or "",
-            "rrule": None,
-            "exdates": [],
+            "type": "local",
+            "writable": True,
+            "events": events,
+            "status": "ok",
+            "count": len(events),
         }
-
-        multidays = expand_multiday_event(evt, window_start, window_end)
-        for inst in multidays:
-            inst_dt = datetime.strptime(inst["date_key"], "%Y-%m-%d")
-            if window_start <= inst_dt <= window_end:
-                events.append(inst)
-
-    return {
-        "name": name,
-        "color": color,
-        "type": "local",
-        "writable": True,
-        "events": events,
-        "status": "ok",
-        "count": len(events),
-    }
+    except Exception as e:
+        return {
+            "name": name,
+            "color": color,
+            "type": "local",
+            "writable": True,
+            "events": [],
+            "status": f"error: {str(e)}",
+            "count": 0,
+        }
 
 
 def create_local_event(cal_info, event_data):
@@ -2297,7 +2339,7 @@ def sync_all_events():
 
     enabled_cals = [
         c for c in calendars
-        if c.get("enabled", True) and (
+        if isinstance(c, dict) and c.get("enabled", True) and (
             c.get("url") or
             c.get("googleCalendarId") or
             c.get("calendarId") or
@@ -2325,53 +2367,88 @@ def sync_all_events():
     cal_statuses = []
 
     if enabled_cals:
-        with ThreadPoolExecutor(max_workers=min(8, len(enabled_cals))) as executor:
+        # Cap workers at 6 to avoid server-side throttling (e.g. on Apple iCloud CalDAV)
+        max_workers = min(6, len(enabled_cals))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(fetch_calendar_item, c, window_start, window_end)
                 for c in enabled_cals
             ]
             for f in futures:
-                res = f.result()
-                all_events.extend(res["events"])
-                cal_statuses.append({
-                    "name": res["name"],
-                    "color": res["color"],
-                    "type": res.get("type", "ical"),
-                    "writable": bool(res.get("writable", False)),
-                    "status": res["status"],
-                    "count": res["count"],
-                })
+                try:
+                    res = f.result()
+                    if isinstance(res, dict):
+                        all_events.extend(res.get("events", []))
+                        cal_statuses.append({
+                            "name": res.get("name", "Calendar"),
+                            "color": res.get("color", "#4A90E2"),
+                            "type": res.get("type", "ical"),
+                            "writable": bool(res.get("writable", False)),
+                            "status": res.get("status", "ok"),
+                            "count": res.get("count", len(res.get("events", []))),
+                        })
+                except Exception as exc:
+                    cal_statuses.append({
+                        "name": "Calendar",
+                        "color": "#4A90E2",
+                        "type": "ical",
+                        "writable": False,
+                        "status": f"error: {str(exc)}",
+                        "count": 0,
+                    })
 
     events_by_date = {}
     for evt in all_events:
-        d_key = evt["date_key"]
+        if not isinstance(evt, dict):
+            continue
+        d_key = str(evt.get("date_key") or "")
+        if not d_key:
+            continue
         if d_key not in events_by_date:
             events_by_date[d_key] = []
 
-        start_time_str = evt["start_dt"].strftime("%H:%M")
-        end_time_str = evt["end_dt"].strftime("%H:%M")
+        start_dt = evt.get("start_dt")
+        end_dt = evt.get("end_dt")
+
+        if isinstance(start_dt, datetime):
+            start_time_str = start_dt.strftime("%H:%M")
+            start_iso = start_dt.isoformat()
+        else:
+            start_time_str = "00:00"
+            start_iso = str(start_dt or "")
+
+        if isinstance(end_dt, datetime):
+            end_time_str = end_dt.strftime("%H:%M")
+        else:
+            end_time_str = "00:00"
+
+        is_all_day = bool(evt.get("all_day", False))
 
         events_by_date[d_key].append({
-            "id": evt["id"],
-            "title": evt["title"],
-            "calendar": evt["calendar"],
-            "calendarId": evt.get("calendarId", ""),
-            "calendarType": evt.get("calendarType", "ical"),
+            "id": str(evt.get("id", "")),
+            "title": str(evt.get("title") or "(Untitled Event)"),
+            "calendar": str(evt.get("calendar") or "Calendar"),
+            "calendarId": str(evt.get("calendarId", "")),
+            "calendarType": str(evt.get("calendarType", "ical")),
             "writable": bool(evt.get("writable", False)),
-            "description": evt.get("description", ""),
-            "color": evt["color"],
-            "allDay": evt["all_day"],
-            "startTime": start_time_str if not evt["all_day"] else "All Day",
-            "endTime": end_time_str if not evt["all_day"] else "",
-            "location": evt["location"],
-            "startIso": evt["start_dt"].isoformat(),
-            "meetingUrl": evt.get("meetingUrl") or "",
-            "meetingProvider": evt.get("meetingProvider") or "",
+            "description": str(evt.get("description") or ""),
+            "color": str(evt.get("color") or "#4A90E2"),
+            "allDay": is_all_day,
+            "startTime": start_time_str if not is_all_day else "All Day",
+            "endTime": end_time_str if not is_all_day else "",
+            "location": str(evt.get("location") or ""),
+            "startIso": start_iso,
+            "meetingUrl": str(evt.get("meetingUrl") or ""),
+            "meetingProvider": str(evt.get("meetingProvider") or ""),
         })
 
     for d_key in events_by_date:
         events_by_date[d_key].sort(
-            key=lambda x: (0 if x["allDay"] else 1, x["startTime"], x["title"])
+            key=lambda x: (
+                0 if x.get("allDay") else 1,
+                str(x.get("startTime") or ""),
+                str(x.get("title") or "")
+            )
         )
 
     auth_ok = False
@@ -2392,7 +2469,10 @@ def sync_all_events():
         "eventsByDate": events_by_date,
     }
 
-    write_secure_json(OUTPUT_PATH, output_data, mode=0o600, max_bytes=MAX_OUTPUT_JSON_BYTES)
+    try:
+        write_secure_json(OUTPUT_PATH, output_data, mode=0o600, max_bytes=MAX_OUTPUT_JSON_BYTES)
+    except Exception:
+        pass
     save_translation_cache()
 
     return {
@@ -2417,84 +2497,88 @@ def read_stdin_payload(max_bytes=MAX_CONFIG_BYTES):
 
 
 def main():
-    if len(sys.argv) > 1:
-        arg = sys.argv[1]
-        if arg in ("--purge-data", "--purge-auth", "--cleanup", "--uninstall"):
-            res = purge_plugin_data()
-            print(json.dumps(res, indent=2))
-            sys.exit(0 if res["status"] == "success" else 1)
+    try:
+        if len(sys.argv) > 1:
+            arg = sys.argv[1]
+            if arg in ("--purge-data", "--purge-auth", "--cleanup", "--uninstall"):
+                res = purge_plugin_data()
+                print(json.dumps(res, indent=2))
+                sys.exit(0 if res["status"] == "success" else 1)
 
-    ensure_config_exists()
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    load_translation_cache()
+        ensure_config_exists()
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        load_translation_cache()
 
-    if len(sys.argv) > 1:
-        arg = sys.argv[1]
-        if arg == "--save-config":
-            try:
-                raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
-                if len(raw_input) > MAX_CONFIG_BYTES:
-                    raise ValueError(f"Config payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
-                new_config = json.loads(raw_input)
-                if not isinstance(new_config, list):
-                    raise ValueError("Config must be a JSON array of calendar entries")
-                write_secure_json(CONFIG_PATH, new_config, mode=0o600)
-                print(json.dumps({"status": "success"}))
+        if len(sys.argv) > 1:
+            arg = sys.argv[1]
+            if arg == "--save-config":
+                try:
+                    raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
+                    if len(raw_input) > MAX_CONFIG_BYTES:
+                        raise ValueError(f"Config payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
+                    new_config = json.loads(raw_input)
+                    if not isinstance(new_config, list):
+                        raise ValueError("Config must be a JSON array of calendar entries")
+                    write_secure_json(CONFIG_PATH, new_config, mode=0o600)
+                    print(json.dumps({"status": "success"}))
+                    sys.exit(0)
+                except Exception as e:
+                    print(json.dumps({"status": "error", "message": str(e)}))
+                    sys.exit(1)
+            elif arg == "--get-config":
+                ensure_config_exists()
+                content = safe_load_json(CONFIG_PATH, max_bytes=MAX_CONFIG_BYTES)
+                print(json.dumps(content, ensure_ascii=False, indent=2))
                 sys.exit(0)
-            except Exception as e:
-                print(json.dumps({"status": "error", "message": str(e)}))
-                sys.exit(1)
-        elif arg == "--get-config":
-            ensure_config_exists()
-            content = safe_load_json(CONFIG_PATH, max_bytes=MAX_CONFIG_BYTES)
-            print(json.dumps(content, ensure_ascii=False, indent=2))
-            sys.exit(0)
-        elif arg == "--auth-status":
-            auth_ok = False
-            auth_data = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
-            if auth_data and auth_data.get("refresh_token") and auth_data.get("client_id"):
-                auth_ok = True
-            print(json.dumps({"authenticated": auth_ok}))
-            sys.exit(0)
-        elif arg == "--create-event":
-            try:
-                raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
-                if len(raw_input) > MAX_CONFIG_BYTES:
-                    raise ValueError(f"Payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
-                event_data = json.loads(raw_input)
-                if not isinstance(event_data, dict):
-                    raise ValueError("Payload must be a JSON object")
-                res = create_event(event_data)
-                print(json.dumps(res, ensure_ascii=False))
-                sys.exit(0 if res.get("status") == "success" else 1)
-            except Exception as e:
-                print(json.dumps({"status": "error", "message": str(e)}))
-                sys.exit(1)
-        elif arg == "--delete-event":
-            try:
-                raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
-                if len(raw_input) > MAX_CONFIG_BYTES:
-                    raise ValueError(f"Payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
-                delete_data = json.loads(raw_input)
-                if not isinstance(delete_data, dict):
-                    raise ValueError("Payload must be a JSON object")
-                res = delete_event(delete_data)
-                print(json.dumps(res, ensure_ascii=False))
-                sys.exit(0 if res.get("status") == "success" else 1)
-            except Exception as e:
-                print(json.dumps({"status": "error", "message": str(e)}))
-                sys.exit(1)
-        elif arg == "--writable-calendars":
-            try:
-                writables = get_writable_calendars()
-                print(json.dumps(writables, ensure_ascii=False, indent=2))
+            elif arg == "--auth-status":
+                auth_ok = False
+                auth_data = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
+                if auth_data and auth_data.get("refresh_token") and auth_data.get("client_id"):
+                    auth_ok = True
+                print(json.dumps({"authenticated": auth_ok}))
                 sys.exit(0)
-            except Exception as e:
-                print(json.dumps({"status": "error", "message": str(e)}))
-                sys.exit(1)
+            elif arg == "--create-event":
+                try:
+                    raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
+                    if len(raw_input) > MAX_CONFIG_BYTES:
+                        raise ValueError(f"Payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
+                    event_data = json.loads(raw_input)
+                    if not isinstance(event_data, dict):
+                        raise ValueError("Payload must be a JSON object")
+                    res = create_event(event_data)
+                    print(json.dumps(res, ensure_ascii=False))
+                    sys.exit(0 if res.get("status") == "success" else 1)
+                except Exception as e:
+                    print(json.dumps({"status": "error", "message": str(e)}))
+                    sys.exit(1)
+            elif arg == "--delete-event":
+                try:
+                    raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
+                    if len(raw_input) > MAX_CONFIG_BYTES:
+                        raise ValueError(f"Payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
+                    delete_data = json.loads(raw_input)
+                    if not isinstance(delete_data, dict):
+                        raise ValueError("Payload must be a JSON object")
+                    res = delete_event(delete_data)
+                    print(json.dumps(res, ensure_ascii=False))
+                    sys.exit(0 if res.get("status") == "success" else 1)
+                except Exception as e:
+                    print(json.dumps({"status": "error", "message": str(e)}))
+                    sys.exit(1)
+            elif arg == "--writable-calendars":
+                try:
+                    writables = get_writable_calendars()
+                    print(json.dumps(writables, ensure_ascii=False, indent=2))
+                    sys.exit(0)
+                except Exception as e:
+                    print(json.dumps({"status": "error", "message": str(e)}))
+                    sys.exit(1)
 
-    result = sync_all_events()
-    print(json.dumps(result))
+        result = sync_all_events()
+        print(json.dumps(result))
+    except Exception as e:
+        print(json.dumps({"status": "error", "message": str(e)}))
+        sys.exit(0)
 
 
 if __name__ == "__main__":

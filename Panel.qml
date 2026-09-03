@@ -43,6 +43,8 @@ Panel {
   readonly property var notifyMinutesBefore: root.setting("notifyMinutesBefore", "staged")
   readonly property int syncIntervalMinutes: root.setting("syncIntervalMinutes", 15)
   readonly property bool enableMeetingLinks: root.setting("enableMeetingLinks", true)
+  readonly property bool showNextEvent: root.setting("showNextEvent", true)
+  readonly property string nextEventHorizon: String(root.setting("nextEventHorizon", "today"))
   readonly property int clockHourCycle: Model.normalizedHourCycle(root.setting(
     "clockHourCycle",
     Model.hourCycleForClockFormat(root.setting("format", "dddd HH:mm"), 24)
@@ -484,6 +486,23 @@ Panel {
     if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  // Bar calendar allowlist: always an array, strictly applied. Only listed
+  // calendars show; a missing or empty list shows nothing on the bar.
+  function barCalendarShown(name) {
+    var list = root.setting("nextEventCalendars", [])
+    return Array.isArray(list) && list.indexOf(name) !== -1
+  }
+
+  function toggleBarCalendar(name) {
+    var stored = root.setting("nextEventCalendars", [])
+    var checked = Array.isArray(stored) ? stored.slice() : []
+    var index = checked.indexOf(name)
+    if (index === -1) checked.push(name)
+    else checked.splice(index, 1)
+    checked.sort()
+    root.persistSettings({ nextEventCalendars: checked })
   }
 
   function setClockHourCycle(hourCycle) {
@@ -3179,9 +3198,197 @@ Panel {
                 }
               }
             }
+
+            // 6. Next Event On Bar Card
+            Rectangle {
+              width: parent.width
+              height: root.showNextEvent
+                ? Style.space(62) + Style.space(30) + (root.activeCalendars.length > 0
+                  ? Style.space(26) + Style.space(22) * root.activeCalendars.length
+                  : 0)
+                : Style.space(60)
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.contentForeground, Color.accent)
+              border.width: Style.spacing.hairline
+              border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+              clip: true
+
+              Column {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(12)
+                spacing: Style.space(8)
+
+                Item {
+                  width: parent.width
+                  height: Style.space(36)
+
+                  Column {
+                    anchors.left: parent.left
+                    anchors.right: nextEventToggleSwitch.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "Next Event On Bar"
+                      color: root.contentForeground
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "Show the next or ongoing event next to the clock"
+                      color: Qt.darker(root.contentForeground, 1.8)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  ToggleSwitch {
+                    id: nextEventToggleSwitch
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: root.showNextEvent
+                    foreground: root.contentForeground
+                    accent: Color.accent
+                    onToggled: root.persistSettings({ showNextEvent: !root.showNextEvent })
+                  }
+                }
+
+                // Look-ahead horizon, same pill shape as the sync interval.
+                Row {
+                  visible: root.showNextEvent
+                  spacing: Style.space(6)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Look ahead:"
+                    color: Qt.darker(root.contentForeground, 1.8)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Repeater {
+                    model: [
+                      { label: "Today", value: "today" },
+                      { label: "Today+Tomorrow", value: "tomorrow" },
+                      { label: "Week", value: "week" },
+                      { label: "Month", value: "month" },
+                      { label: "Forever", value: "forever" }
+                    ]
+
+                    Rectangle {
+                      id: horizonPill
+                      required property var modelData
+                      readonly property bool isSelected: root.nextEventHorizon === modelData.value
+                      width: horizonPillText.implicitWidth + Style.space(16)
+                      height: Style.space(24)
+                      radius: Style.cornerRadius > 0 ? height / 2 : 0
+                      color: isSelected ? Color.accent : "transparent"
+                      border.width: 1
+                      border.color: isSelected ? Color.accent : Qt.darker(root.contentForeground, 1.8)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: horizonPillText
+                        anchors.centerIn: parent
+                        text: horizonPill.modelData.label
+                        color: isSelected ? Color.background : root.contentForeground
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: isSelected
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.persistSettings({ nextEventHorizon: horizonPill.modelData.value })
+                      }
+                    }
+                  }
+                }
+
+                // Per-calendar tickboxes, the bar's strict allowlist.
+                Column {
+                  visible: root.showNextEvent && root.activeCalendars.length > 0
+                  width: parent.width
+                  spacing: Style.space(4)
+
+                  Repeater {
+                    model: root.activeCalendars
+
+                    Item {
+                      id: barCalRow
+                      required property var modelData
+                      width: parent.width
+                      height: Style.space(20)
+                      readonly property bool isChecked: root.barCalendarShown(modelData.name)
+
+                      Row {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(8)
+
+                        Rectangle {
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: Style.space(8)
+                          height: Style.space(8)
+                          radius: Style.space(4)
+                          color: String(barCalRow.modelData.color || "#888888")
+                        }
+
+                        Text {
+                          textFormat: Text.PlainText
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: barCalRow.modelData.name
+                          color: root.contentForeground
+                          font.family: root.contentFontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+                      }
+
+                      Rectangle {
+                        id: barCalBox
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(16)
+                        height: Style.space(16)
+                        radius: 4
+                        color: barCalRow.isChecked ? Color.accent : "transparent"
+                        border.width: 1
+                        border.color: barCalRow.isChecked ? Color.accent : Qt.darker(root.contentForeground, 1.6)
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        Text {
+                          textFormat: Text.PlainText
+                          anchors.centerIn: parent
+                          visible: barCalRow.isChecked
+                          text: "\u2713"
+                          color: Color.background
+                          font.family: root.contentFontFamily
+                          font.pixelSize: Style.font.caption
+                          font.bold: true
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleBarCalendar(barCalRow.modelData.name)
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
-
       }
     }
   }

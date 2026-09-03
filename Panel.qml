@@ -492,12 +492,12 @@ Panel {
   // calendars show; a missing or empty list shows nothing on the bar.
   function barCalendarShown(name) {
     var list = root.setting("nextEventCalendars", [])
-    return Array.isArray(list) && list.indexOf(name) !== -1
+    return Model.isList(list) && list.indexOf(name) !== -1
   }
 
   function toggleBarCalendar(name) {
     var stored = root.setting("nextEventCalendars", [])
-    var checked = Array.isArray(stored) ? stored.slice() : []
+    var checked = Model.isList(stored) ? stored.slice() : []
     var index = checked.indexOf(name)
     if (index === -1) checked.push(name)
     else checked.splice(index, 1)
@@ -602,6 +602,14 @@ Panel {
     watchChanges: true
     printErrors: false
     onFileChanged: root.syncCalendars(true)
+  }
+
+  // Nothing else reads the event cache until the panel is opened or the
+  // sync timer fires, so after a shell restart the bar's next-event label
+  // stayed empty. Load the cache immediately and kick a background refresh.
+  Component.onCompleted: {
+    eventsFile.reload()
+    root.syncCalendars(false)
   }
 
   Process {

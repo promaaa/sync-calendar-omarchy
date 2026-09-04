@@ -373,15 +373,20 @@ function nextUpcomingEvent(eventsByDate, now, horizonDays, calendarNames) {
   return best
 }
 
-// Countdown notation for the bar label: minutes under half an hour, the
-// half-hour grid through two hours, the whole-hour grid beyond it. Both grids
-// round half up, so 45m reads 1h, 75m reads 1.5h, and 2:20 / 3:45 read 2h / 4h.
+// Countdown notation for the bar label: 
+// - minutes under 45 minutes, 
+// - the half-hour grid through two hours
+// - the whole-hour grid through a day
+// - then full days beyond it. 
+// Each grid rounds half up, so 45m reads 1h and 2:20 / 3:45 read 2h / 4h; 
+// a day remainder of 12h or more tips to the next day (1d18h reads 2d, 6d8h reads 6d).
 function formatEventCountdown(startMs, nowMs) {
   var diffMin = Math.round((Number(startMs) - Number(nowMs)) / 60000)
   if (diffMin < 1) return "now"
-  if (diffMin < 30) return "in " + diffMin + "m"
+  if (diffMin < 45) return "in " + diffMin + "m"
   if (diffMin <= 120) return "in " + (Math.round(diffMin / 30) * 30 / 60) + "h"
-  return "in " + Math.round(diffMin / 60) + "h"
+  if (diffMin < 1410) return "in " + Math.round(diffMin / 60) + "h"
+  return "in " + Math.round(diffMin / 1440) + "d"
 }
 
 function truncateEventTitle(title, maxChars) {

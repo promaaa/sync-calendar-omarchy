@@ -2842,7 +2842,7 @@ Panel {
             // 2. Auto-Sync Interval Card
             Rectangle {
               width: parent.width
-              height: Style.space(76)
+              height: Style.space(88)
               radius: Style.cornerRadius
               color: Style.hoverFillFor(root.contentForeground, Color.accent)
               border.width: Style.spacing.hairline
@@ -2853,12 +2853,11 @@ Panel {
                 anchors.margins: Style.space(12)
                 spacing: Style.space(8)
 
-                Row {
-                  spacing: Style.space(6)
+                Column {
+                  spacing: Style.space(2)
 
                   Text {
                     textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
                     text: "Auto-Sync Interval"
                     color: root.contentForeground
                     font.family: root.contentFontFamily
@@ -2868,8 +2867,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "· Background updates"
+                    text: "Background updates"
                     color: Qt.darker(root.contentForeground, 1.8)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -2891,8 +2889,8 @@ Panel {
                     Rectangle {
                       id: syncOptPill
                       required property var modelData
-                      width: syncOptText.implicitWidth + Style.space(16)
-                      height: Style.space(24)
+                      width: syncOptText.implicitWidth + Style.space(14)
+                      height: Style.space(22)
                       radius: Style.cornerRadius > 0 ? height / 2 : 0
                       color: root.syncIntervalMinutes === modelData.value ? Color.accent : "transparent"
                       border.width: 1
@@ -2978,15 +2976,6 @@ Panel {
                 Row {
                   visible: root.notifyUpcomingEvents
                   spacing: Style.space(6)
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Notice:"
-                    color: Qt.darker(root.contentForeground, 1.6)
-                    font.family: root.contentFontFamily
-                    font.pixelSize: Style.font.caption
-                  }
 
                   Repeater {
                     model: [

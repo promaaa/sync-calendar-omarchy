@@ -936,6 +936,10 @@ def parse_ics(content, cal_info, window_start, window_end):
         elif prop_name == "DTEND":
             _, dt = parse_datetime_value(val_part, prop_params)
             current["DTEND"] = dt
+        elif prop_name == "DURATION":
+            # RFC 5545 §3.3.6: VEVENT may use DURATION instead of DTEND
+            # (e.g. Sisu / university feeds emit DTSTART + DURATION only).
+            current["DURATION"] = val_part.strip()
         elif prop_name == "SUMMARY":
             current["SUMMARY"] = unescape_ical_text(val_part)
         elif prop_name == "LOCATION":
@@ -964,7 +968,12 @@ def parse_ics(content, cal_info, window_start, window_end):
         if not start_dt:
             continue
         all_day = raw.get("all_day", False)
-        end_dt = raw.get("DTEND", start_dt + (timedelta(days=1) if all_day else timedelta(hours=1)))
+        end_dt = raw.get("DTEND")
+        if end_dt is None and raw.get("DURATION"):
+            # RFC 5545: DTEND and DURATION MUST NOT co-occur; DTEND wins if present.
+            end_dt = start_dt + parse_iso_duration(raw["DURATION"])
+        if end_dt is None:
+            end_dt = start_dt + (timedelta(days=1) if all_day else timedelta(hours=1))
         if end_dt < start_dt:
             end_dt = start_dt
 

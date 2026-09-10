@@ -421,7 +421,12 @@ Panel {
   }
 
   function sendDesktopNotification(title, body) {
-    notifyProc.command = ["notify-send", "-a", "Omarchy Calendar", "-i", "x-office-calendar", String(title || "Omarchy Calendar"), String(body || "")]
+    // Send through omarchy-notification-send with a Nerd Font glyph rather than
+    // a themed icon name: mimetype icons like x-office-calendar are absent from
+    // most icon themes, and an unresolved name renders as a broken-image
+    // placeholder. The glyph is the same literal U+F00ED character the panel
+    // header already uses.
+    notifyProc.command = ["omarchy-notification-send", "--app-name", "Omarchy Calendar", "-g", "󰃭", "-u", "normal", String(title || "Omarchy Calendar"), String(body || "")]
     notifyProc.running = true
   }
 

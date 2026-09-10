@@ -1,9 +1,16 @@
-# Calendar Sync for Omarchy and Shibumi
+# Calendar Sync Clock for Omarchy
 
-A fast, lightweight calendar and clock status bar plugin for Omarchy's stock bar and Shibumi Shell that syncs Google Calendar, Apple iCloud, Proton Calendar, Microsoft Outlook, Fastmail (JMAP / iCal), Nextcloud, Stalwart, and generic iCalendar (.ics / webcal) feeds directly into your desktop.
+**Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way: create and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
 
+```bash
+omarchy plugin add https://github.com/promaaa/sync-calendar-omarchy.git --enable --yes
+```
+
+[![Omarchy Plugins](https://img.shields.io/badge/Omarchy%20Plugins-listed-2ea44f?style=flat-square)](https://plugins.omarchy.org/plugin.html?id=promaa.clock)
 ![GitHub stars](https://img.shields.io/github/stars/promaaa/sync-calendar-omarchy?style=flat-square)
 ![License](https://img.shields.io/github/license/promaaa/sync-calendar-omarchy?style=flat-square)
+
+Works with the stock Omarchy Quattro bar and with Shibumi Shell. Python 3 standard library only, no pip packages, no daemon, no sudo.
 
 ![Global desktop view](global-view.jpg)
 

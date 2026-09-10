@@ -316,6 +316,110 @@ function stepMonth(year, month, delta) {
   return { year: target.getFullYear(), month: target.getMonth() }
 }
 
+// Lists read out of QML-backed settings can arrive as QVariantList proxies:
+// array-like, with constructor.name "Array", yet Array.isArray() says no.
+// Treat any object carrying a numeric length as a list.
+function isList(value) {
+  return !!value && typeof value === "object" && typeof value.length === "number"
+}
+
+// The next timed event still running or yet to start, looking ahead from
+// today over `horizonDays` days (1 = today only, 0 = as far as the cache
+// goes). `calendarNames` is a strict allowlist: only events from the named
+// calendars count, and an empty or non-array list shows nothing. All-day
+// events are skipped entirely; an event counts until its end passes, so one
+// that already started (ongoing) is returned too. A missing or unparsable
+// endTime assumes one hour.
+function nextUpcomingEvent(eventsByDate, now, horizonDays, calendarNames) {
+  var days = eventsByDate || {}
+  var nowMs = now instanceof Date ? now.getTime() : Number(now)
+  if (!isFinite(nowMs)) return null
+
+  var nowDate = new Date(nowMs)
+  var todayKey = keyForDate(nowDate)
+  var span = Number(horizonDays)
+  if (!isFinite(span)) span = 1
+  var maxKey = ""
+  if (span > 0) {
+    maxKey = keyForDate(new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() + Math.floor(span) - 1))
+  }
+  var allow = isList(calendarNames) ? calendarNames : []
+
+  var keys = Object.keys(days).sort()
+  var best = null
+  var bestStart = Infinity
+  for (var k = 0; k < keys.length; k++) {
+    var key = keys[k]
+    if (key < todayKey) continue
+    if (maxKey !== "" && key > maxKey) continue
+    var events = days[key]
+    if (!events || !events.length) continue
+    for (var i = 0; i < events.length; i++) {
+      var evt = events[i]
+      if (!evt || evt.allDay || !evt.startIso) continue
+      if (allow.indexOf(evt.calendar) === -1) continue
+      var startMs = new Date(evt.startIso).getTime()
+      if (isNaN(startMs) || startMs >= bestStart) continue
+      var endMs = NaN
+      if (evt.endTime) {
+        endMs = new Date(key + "T" + evt.endTime + ":00").getTime()
+      }
+      if (isNaN(endMs) || endMs <= startMs) endMs = startMs + 3600000
+      if (endMs <= nowMs) continue
+      best = evt
+      bestStart = startMs
+    }
+  }
+  return best
+}
+
+// Countdown notation for the bar label: 
+// - minutes under 45 minutes, 
+// - the half-hour grid through two hours
+// - the whole-hour grid through a day
+// - then full days beyond it. 
+// Each grid rounds half up, so 45m reads 1h and 2:20 / 3:45 read 2h / 4h; 
+// a day remainder of 12h or more tips to the next day (1d18h reads 2d, 6d8h reads 6d).
+function formatEventCountdown(startMs, nowMs) {
+  var diffMin = Math.round((Number(startMs) - Number(nowMs)) / 60000)
+  if (diffMin < 1) return "now"
+  if (diffMin < 45) return "in " + diffMin + "m"
+  if (diffMin <= 120) return "in " + (Math.round(diffMin / 30) * 30 / 60) + "h"
+  if (diffMin < 1410) return "in " + Math.round(diffMin / 60) + "h"
+  return "in " + Math.round(diffMin / 1440) + "d"
+}
+
+function truncateEventTitle(title, maxChars) {
+  var text = String(title === undefined || title === null ? "" : title).replace(/\s+/g, " ").trim()
+  var limit = Number(maxChars) > 0 ? Number(maxChars) : 22
+  if (text.length <= limit) return text
+  return text.substring(0, limit - 1).trim() + "\u2026"
+}
+
+// Bar horizon setting to day span. Exactly the values the settings pills
+// write; anything else (or unset) falls back to today.
+function nextEventHorizonDays(value) {
+  switch (String(value === undefined || value === null ? "" : value).toLowerCase()) {
+    case "today": return 1
+    case "tomorrow": return 2
+    case "week": return 7
+    case "month": return 30
+    case "forever": return 0
+    default: return 1
+  }
+}
+
+function formatBarEventLabel(event, now) {
+  if (!event || !event.startIso) return ""
+  var nowMs = now instanceof Date ? now.getTime() : Number(now)
+  if (!isFinite(nowMs)) return ""
+  var startMs = new Date(event.startIso).getTime()
+  if (isNaN(startMs)) return ""
+  var title = truncateEventTitle(event.title)
+  if (!title) return ""
+  return title + " \u00b7 " + formatEventCountdown(startMs, nowMs)
+}
+
 function parseEventsFile(text) {
   if (!text || typeof text !== "string") {
     return { eventsByDate: {}, calendars: [], lastSyncedFormatted: "", totalEvents: 0, configuredCount: 0 }
@@ -490,6 +594,12 @@ if (typeof module !== "undefined") {
     formatEventTime: formatEventTime,
     isoWeekLiteral: isoWeekLiteral,
     parseEventsFile: parseEventsFile,
+    nextUpcomingEvent: nextUpcomingEvent,
+    isList: isList,
+    nextEventHorizonDays: nextEventHorizonDays,
+    formatEventCountdown: formatEventCountdown,
+    truncateEventTitle: truncateEventTitle,
+    formatBarEventLabel: formatBarEventLabel,
     formatSelectedDateLabel: formatSelectedDateLabel,
     CALENDAR_COLORS: CALENDAR_COLORS,
     cycleCalendarColor: cycleCalendarColor,

@@ -35,6 +35,24 @@ BarWidget {
   readonly property string displayText: formatted(displayDate)
   readonly property var verticalLines: displayText.split("\n")
 
+  // Next timed event within the configured horizon, shown beside the clock.
+  // The panel keeps the event cache warm (sync + file watch); this view reads
+  // its parsed eventsData and recomputes on every minute the clock ticks.
+  readonly property bool showNextEvent: setting("showNextEvent", true)
+  readonly property string nextEventHorizon: String(setting("nextEventHorizon", "today"))
+  readonly property var nextEventCalendars: setting("nextEventCalendars", [])
+  readonly property var eventsByDate: panelLoader.item ? panelLoader.item.eventsData.eventsByDate : ({})
+
+  function computeNextEventText(now) {
+    if (!showNextEvent || vertical) return ""
+    var evt = Model.nextUpcomingEvent(eventsByDate, now,
+      Model.nextEventHorizonDays(nextEventHorizon), nextEventCalendars)
+    return Model.formatBarEventLabel(evt, now)
+  }
+
+  // displayDate ticks every minute, so the countdown recomputes on its own.
+  readonly property string upcomingEventText: computeNextEventText(displayDate)
+
   function refresh() {
     displayDate = new Date()
     if (panelLoader.item && panelLoader.item.refresh) panelLoader.item.refresh()
@@ -161,7 +179,9 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.vertical ? "" : root.displayText
+    text: root.vertical ? "" : (root.upcomingEventText === ""
+      ? root.displayText
+      : root.displayText + " \u00b7 " + root.upcomingEventText)
     labelVisible: !root.vertical
     hasVisualContent: root.vertical ? root.verticalLines.length > 0 : text !== ""
     fixedHeight: root.vertical ? root.verticalLines.length * Style.bar.iconSlot : -1

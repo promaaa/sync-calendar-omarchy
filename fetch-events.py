@@ -16,6 +16,7 @@ import calendar
 import urllib.request
 import urllib.parse
 import urllib.error
+import base64
 from datetime import datetime, date, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1197,6 +1198,13 @@ def fetch_calendar(cal_info, window_start, window_end):
     if not raw_url:
         return {"name": name, "color": cal_info.get("color", "#4A90E2"), "events": [], "status": "no_url", "count": 0}
 
+    username = cal_info.get("username")
+    password = cal_info.get("password")
+    headers = {"User-Agent": USER_AGENT}
+    if username and password:
+        credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+        headers["Authorization"] = f"Basic {credentials}"
+
     # Convert webcal:// or webcals:// to https://
     if raw_url.startswith("webcal://"):
         url = "https://" + raw_url[9:]
@@ -1217,7 +1225,7 @@ def fetch_calendar(cal_info, window_start, window_end):
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 content = safe_read_text(f, max_bytes=MAX_ICAL_BYTES)
         else:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            req = urllib.request.Request(url, headers=headers)
             resp_content = None
             last_error = None
             # Retry transient connection resets / throttling (common on Apple iCloud CalDAV)

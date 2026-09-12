@@ -13,6 +13,8 @@ import secrets
 import stat
 import time
 import calendar
+import shutil
+import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -1016,47 +1018,171 @@ def parse_ics(content, cal_info, window_start, window_end):
 
 AUTH_FILE = os.path.join(STATE_DIR, "google-auth.json")
 
+# Google answers "invalid_grant" when a refresh token can never be used again.
+# The usual cause is an OAuth app left in "Testing" publishing status: Google
+# expires those refresh tokens after 7 days, so the calendar silently drops
+# out about once a week. Publishing the app ("In production") stops that.
+GOOGLE_AUTH_STATUS_MISSING = "auth_required: run google-auth.py"
+GOOGLE_AUTH_STATUS_EXPIRED = "auth_expired: Google login expired or revoked - reconnect in Settings"
+GOOGLE_AUTH_EXPIRED_HINT = (
+    "Google rejected the saved login (token expired or revoked). "
+    "Open the calendar panel and click Reconnect. If this happens every "
+    "week, publish your OAuth app (In production) in Google Cloud Console."
+)
 
-def get_google_access_token():
-    """Retrieve or refresh Google OAuth2 access token."""
+def _notify_desktop(title, body):
+    """Best-effort desktop notification; never raises, never blocks the sync."""
+    try:
+        exe = shutil.which("notify-send")
+        if not exe:
+            return
+        subprocess.run(
+            [exe, "-a", "Omarchy Calendar", "-i", "x-office-calendar", "-u", "critical",
+             str(title), str(body)],
+            timeout=5, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _record_google_refresh_error(auth_data, detail):
+    """Persist a permanent refresh failure so the UI can offer a reconnect."""
+    first_time = not auth_data.get("refresh_error")
+    auth_data["refresh_error"] = "invalid_grant"
+    auth_data["refresh_error_detail"] = str(detail)[:200]
+    auth_data["refresh_error_at"] = int(time.time())
+    auth_data.pop("access_token", None)
+    auth_data.pop("expires_at", None)
+    try:
+        write_secure_json(AUTH_FILE, auth_data, mode=0o600)
+    except Exception:
+        pass
+    if first_time:
+        _notify_desktop("Google Calendar disconnected", GOOGLE_AUTH_EXPIRED_HINT)
+
+
+def resolve_google_access_token():
+    """
+    Return (access_token, state, detail).
+
+    state is one of:
+      "ok"      - token usable
+      "missing" - no credentials saved yet (google-auth.py never run)
+      "revoked" - Google permanently rejected the refresh token (invalid_grant)
+      "error"   - transient failure (network, 5xx); credentials still valid
+    """
     try:
         auth_data = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
-        if not auth_data:
-            return None
+    except Exception as exc:
+        return None, "error", f"cannot read auth file: {exc}"
+    if not auth_data:
+        return None, "missing", "no google-auth.json"
 
-        now = time.time()
-        if auth_data.get("access_token") and auth_data.get("expires_at", 0) > now + 60:
-            return auth_data["access_token"]
+    now = time.time()
+    if auth_data.get("access_token") and auth_data.get("expires_at", 0) > now + 60:
+        return auth_data["access_token"], "ok", ""
 
-        refresh_token = auth_data.get("refresh_token")
-        client_id = auth_data.get("client_id")
-        client_secret = auth_data.get("client_secret")
+    refresh_token = auth_data.get("refresh_token")
+    client_id = auth_data.get("client_id")
+    client_secret = auth_data.get("client_secret")
+    if not refresh_token or not client_id or not client_secret:
+        return None, "missing", "incomplete credentials"
 
-        if not refresh_token or not client_id or not client_secret:
-            return None
+    url = "https://oauth2.googleapis.com/token"
+    payload = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"User-Agent": USER_AGENT})
 
-        url = "https://oauth2.googleapis.com/token"
-        payload = urllib.parse.urlencode({
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        }).encode("utf-8")
-
-        req = urllib.request.Request(url, data=payload, headers={"User-Agent": USER_AGENT})
+    try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-            data = json.loads(raw.decode("utf-8"))
-            access_token = data.get("access_token")
-            auth_data["access_token"] = access_token
-            auth_data["expires_at"] = int(now) + data.get("expires_in", 3600)
-            auth_data["updated_at"] = int(now)
-
+        data = json.loads(raw.decode("utf-8"))
+        access_token = data.get("access_token")
+        if not access_token:
+            return None, "error", "token endpoint returned no access_token"
+        auth_data["access_token"] = access_token
+        auth_data["expires_at"] = int(now) + int(data.get("expires_in", 3600) or 3600)
+        auth_data["updated_at"] = int(now)
+        for key in ("refresh_error", "refresh_error_detail", "refresh_error_at"):
+            auth_data.pop(key, None)
+        try:
             write_secure_json(AUTH_FILE, auth_data, mode=0o600)
+        except Exception:
+            pass
+        return access_token, "ok", ""
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = safe_read_bytes(exc, max_bytes=64 * 1024).decode("utf-8", "replace")
+        except Exception:
+            pass
+        err_code = ""
+        err_desc = ""
+        try:
+            parsed = json.loads(body) if body else {}
+            err_code = str(parsed.get("error", ""))
+            err_desc = str(parsed.get("error_description", ""))
+        except Exception:
+            pass
+        if exc.code in (400, 401) and err_code in ("invalid_grant", "invalid_client", "unauthorized_client"):
+            detail = f"{err_code}: {err_desc}".strip(": ")
+            _record_google_refresh_error(auth_data, detail)
+            return None, "revoked", detail
+        return None, "error", f"HTTP {exc.code} {err_code or ''}".strip()
+    except Exception as exc:
+        return None, "error", str(exc) or exc.__class__.__name__
 
-            return access_token
+
+# Why the last token lookup failed, for callers that only get None back.
+_LAST_GOOGLE_AUTH = {"state": "missing", "detail": ""}
+
+
+def get_google_access_token():
+    """Retrieve or refresh Google OAuth2 access token (None when unavailable)."""
+    try:
+        token, state, detail = resolve_google_access_token()
+    except Exception as exc:
+        token, state, detail = None, "error", str(exc) or exc.__class__.__name__
+    _LAST_GOOGLE_AUTH["state"] = state
+    _LAST_GOOGLE_AUTH["detail"] = detail
+    return token
+
+
+def google_auth_failure_status():
+    """Calendar status string explaining why get_google_access_token() returned None."""
+    return google_auth_status_string(_LAST_GOOGLE_AUTH["state"], _LAST_GOOGLE_AUTH["detail"])
+
+
+def google_auth_summary():
+    """Describe the saved Google login for the UI without touching the network."""
+    summary = {"authenticated": False, "state": "missing", "detail": ""}
+    try:
+        auth_d = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
     except Exception:
-        return None
+        return summary
+    if not auth_d or not (auth_d.get("refresh_token") and auth_d.get("client_id")):
+        return summary
+    if auth_d.get("refresh_error"):
+        summary["state"] = "revoked"
+        summary["detail"] = str(auth_d.get("refresh_error_detail") or auth_d.get("refresh_error"))
+        summary["since"] = int(auth_d.get("refresh_error_at") or 0)
+        return summary
+    summary["authenticated"] = True
+    summary["state"] = "ok"
+    return summary
+
+
+def google_auth_status_string(state, detail):
+    if state == "missing":
+        return GOOGLE_AUTH_STATUS_MISSING
+    if state == "revoked":
+        return GOOGLE_AUTH_STATUS_EXPIRED
+    return f"error: Google token refresh failed ({detail or 'unknown'})"
 
 
 def fetch_google_api_calendar(cal_info, window_start, window_end):
@@ -1072,7 +1198,7 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
             "name": name,
             "color": cal_info.get("color", "#4A90E2"),
             "events": [],
-            "status": "auth_required: run google-auth.py",
+            "status": google_auth_failure_status(),
             "count": 0,
         }
 
@@ -1866,6 +1992,11 @@ def create_google_event(cal_info, event_data):
 
     access_token = get_google_access_token()
     if not access_token:
+        auth_state = _LAST_GOOGLE_AUTH["state"]
+        if auth_state == "revoked":
+            raise ValueError("Google login expired or revoked: reconnect Google in Settings")
+        if auth_state == "error":
+            raise ValueError(f"Google token refresh failed: {_LAST_GOOGLE_AUTH['detail']}")
         raise ValueError("Google authentication required: run google-auth.py")
 
     title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
@@ -1943,6 +2074,11 @@ def delete_google_event(cal_info, event_id):
 
     access_token = get_google_access_token()
     if not access_token:
+        auth_state = _LAST_GOOGLE_AUTH["state"]
+        if auth_state == "revoked":
+            raise ValueError("Google login expired or revoked: reconnect Google in Settings")
+        if auth_state == "error":
+            raise ValueError(f"Google token refresh failed: {_LAST_GOOGLE_AUTH['detail']}")
         raise ValueError("Google authentication required: run google-auth.py")
 
     encoded_cal_id = urllib.parse.quote(cal_id, safe="")
@@ -2451,20 +2587,15 @@ def sync_all_events():
             )
         )
 
-    auth_ok = False
-    try:
-        auth_d = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
-        if auth_d:
-            auth_ok = bool(auth_d.get("refresh_token") and auth_d.get("client_id"))
-    except Exception:
-        pass
+    google_auth = google_auth_summary()
 
     output_data = {
         "lastSynced": int(time.time()),
         "lastSyncedFormatted": now.strftime("%H:%M"),
         "totalEvents": len(all_events),
         "configuredCount": len(enabled_cals),
-        "authenticated": auth_ok,
+        "authenticated": google_auth["authenticated"],
+        "googleAuth": google_auth,
         "calendars": cal_statuses,
         "eventsByDate": events_by_date,
     }
@@ -2531,11 +2662,7 @@ def main():
                 print(json.dumps(content, ensure_ascii=False, indent=2))
                 sys.exit(0)
             elif arg == "--auth-status":
-                auth_ok = False
-                auth_data = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
-                if auth_data and auth_data.get("refresh_token") and auth_data.get("client_id"):
-                    auth_ok = True
-                print(json.dumps({"authenticated": auth_ok}))
+                print(json.dumps(google_auth_summary()))
                 sys.exit(0)
             elif arg == "--create-event":
                 try:

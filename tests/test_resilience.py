@@ -150,6 +150,111 @@ class DefensiveEventSortingAndSyncTests(unittest.TestCase):
                 self.assertEqual(day_events[1]["title"], "(Untitled Event)")
 
 
+class _FakeHTTPResponse:
+    def __init__(self, data):
+        self.stream = io.BytesIO(data)
+
+    def read(self, size=-1):
+        return self.stream.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+class GoogleAuthRefreshTests(unittest.TestCase):
+    """Google API calendars must say *why* they stopped syncing, not just go blank."""
+
+    START = fetch_events.datetime(2026, 9, 1)
+    END = fetch_events.datetime(2026, 9, 30)
+    CAL = {"name": "Lab", "googleCalendarId": "abc@group.calendar.google.com"}
+
+    def _write_auth(self, directory, **extra):
+        path = os.path.join(directory, "google-auth.json")
+        data = {
+            "client_id": "cid", "client_secret": "sec", "refresh_token": "rt",
+            "access_token": "stale", "expires_at": 0, "updated_at": 0,
+        }
+        data.update(extra)
+        fetch_events.write_secure_json(path, data)
+        return path
+
+    @staticmethod
+    def _http_error_factory(code, body):
+        def raise_it(*args, **kwargs):
+            raise urllib.error.HTTPError("https://oauth2.googleapis.com/token", code, "Bad Request", {}, io.BytesIO(body))
+        return raise_it
+
+    def test_invalid_grant_marks_calendar_auth_expired_and_notifies_once(self):
+        body = b'{"error": "invalid_grant", "error_description": "Token has been expired or revoked."}'
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = self._write_auth(directory)
+            with mock.patch.object(fetch_events, "AUTH_FILE", auth_path), \
+                 mock.patch.object(fetch_events.urllib.request, "urlopen", side_effect=self._http_error_factory(400, body)), \
+                 mock.patch.object(fetch_events, "_notify_desktop") as notify:
+                first = fetch_events.fetch_google_api_calendar(self.CAL, self.START, self.END)
+                second = fetch_events.fetch_google_api_calendar(self.CAL, self.START, self.END)
+                summary = fetch_events.google_auth_summary()
+                with self.assertRaises(ValueError) as cm:
+                    fetch_events.create_google_event(self.CAL, {"title": "x", "start": "2026-09-01T09:00:00", "end": "2026-09-01T10:00:00"})
+
+            self.assertTrue(first["status"].startswith("auth_expired"), first["status"])
+            self.assertEqual(first["count"], 0)
+            self.assertTrue(second["status"].startswith("auth_expired"), second["status"])
+            self.assertIn("expired or revoked", str(cm.exception))
+
+            saved = fetch_events.safe_load_json(auth_path)
+            self.assertEqual(saved["refresh_error"], "invalid_grant")
+            self.assertIn("expired or revoked", saved["refresh_error_detail"])
+            self.assertEqual(saved["refresh_token"], "rt")
+            self.assertNotIn("access_token", saved)
+
+            # One desktop alert on the transition, not one per sync.
+            self.assertEqual(notify.call_count, 1)
+
+            self.assertFalse(summary["authenticated"])
+            self.assertEqual(summary["state"], "revoked")
+
+    def test_transient_refresh_failure_is_not_reported_as_auth_problem(self):
+        def raise_url_error(*args, **kwargs):
+            raise urllib.error.URLError("temporary failure in name resolution")
+
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = self._write_auth(directory)
+            with mock.patch.object(fetch_events, "AUTH_FILE", auth_path), \
+                 mock.patch.object(fetch_events.urllib.request, "urlopen", side_effect=raise_url_error), \
+                 mock.patch.object(fetch_events, "_notify_desktop") as notify:
+                result = fetch_events.fetch_google_api_calendar(self.CAL, self.START, self.END)
+                summary = fetch_events.google_auth_summary()
+
+            self.assertTrue(result["status"].startswith("error:"), result["status"])
+            self.assertNotIn("auth_", result["status"])
+            saved = fetch_events.safe_load_json(auth_path)
+            self.assertNotIn("refresh_error", saved)
+            self.assertEqual(saved["refresh_token"], "rt")
+            self.assertTrue(summary["authenticated"])
+            notify.assert_not_called()
+
+    def test_successful_refresh_clears_previous_refresh_error(self):
+        token_body = b'{"access_token": "fresh-token", "expires_in": 3600, "token_type": "Bearer"}'
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = self._write_auth(directory, refresh_error="invalid_grant", refresh_error_at=1)
+            with mock.patch.object(fetch_events, "AUTH_FILE", auth_path):
+                before = fetch_events.google_auth_summary()
+                with mock.patch.object(fetch_events.urllib.request, "urlopen", return_value=_FakeHTTPResponse(token_body)):
+                    token = fetch_events.get_google_access_token()
+                after = fetch_events.google_auth_summary()
+
+            self.assertEqual(before["state"], "revoked")
+            self.assertEqual(token, "fresh-token")
+            saved = fetch_events.safe_load_json(auth_path)
+            self.assertNotIn("refresh_error", saved)
+            self.assertEqual(saved["access_token"], "fresh-token")
+            self.assertGreater(saved["expires_at"], fetch_events.time.time() + 3000)
+            self.assertTrue(after["authenticated"])
+            self.assertEqual(after["state"], "ok")
 class MainCrashShieldTests(unittest.TestCase):
     def test_main_exits_cleanly_on_unexpected_sync_exception(self):
         with mock.patch.object(fetch_events, "sync_all_events", side_effect=RuntimeError("Simulated critical failure")), \

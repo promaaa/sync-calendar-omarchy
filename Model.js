@@ -377,6 +377,48 @@ function parseCalendarsConfig(text) {
   }
 }
 
+// A Google API calendar goes quiet the moment Google rejects the saved OAuth
+// login: its events simply vanish from the agenda. The fetcher reports that
+// per calendar as an "auth_expired:" / "auth_required:" status; this pairs
+// those statuses with the configured Google API calendars so the panel can
+// say what happened and offer a reconnect instead of showing an empty day.
+function googleAuthIssue(configuredList, activeList) {
+  var configured = configuredList || []
+  var googleNames = {}
+  var hasGoogleApi = false
+  for (var i = 0; i < configured.length; i++) {
+    var c = configured[i]
+    if (!c || c.enabled === false || !c.googleCalendarId) continue
+    googleNames[String(c.name || "")] = true
+    hasGoogleApi = true
+  }
+  if (!hasGoogleApi) return null
+
+  var active = activeList || []
+  var kind = null
+  var names = []
+  for (var j = 0; j < active.length; j++) {
+    var a = active[j]
+    if (!a || !googleNames[String(a.name || "")]) continue
+    var status = String(a.status || "")
+    var thisKind = null
+    if (status.indexOf("auth_expired") === 0) thisKind = "expired"
+    else if (status.indexOf("auth_required") === 0) thisKind = "required"
+    if (!thisKind) continue
+    names.push(String(a.name || "Google Calendar"))
+    if (kind !== "expired") kind = thisKind
+  }
+  if (!kind) return null
+  return { kind: kind, names: names }
+}
+
+function googleAuthIssueText(issue) {
+  if (!issue) return ""
+  var who = issue.names.length > 0 ? issue.names.join(", ") : "Google Calendar"
+  if (issue.kind === "expired") return "Google login expired for " + who + ". Click to reconnect."
+  return who + " needs a Google login. Click to connect."
+}
+
 function formatAgendaMarkdown(events, selectedDateLabel, calendarName, hourCycle) {
   if (!events || events.length === 0) return ""
   var header = "### Agenda – " + (selectedDateLabel || "Today")

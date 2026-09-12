@@ -199,6 +199,11 @@ JMAP is a modern, fast, JSON-based calendar standard ([RFC 9670](https://www.rfc
    - Set User Type to **External** (or **Internal** if using a company Google Workspace account).
    - Enter an app name (e.g., `Omarchy Calendar`) and save.
    - Under **Test users**, click **+ Add users** and **add your Google email address**.
+   - **Publish the app.** On the consent screen / **Audience** page, set **Publishing status** to **In production** (click **Publish app**). No Google review is needed for the read-only calendar scope; you will just see an "unverified app" warning once during sign-in.
+
+> [!IMPORTANT]
+> Leaving the app in **Testing** status makes Google expire the refresh token after **7 days**. The plugin then shows `auth_expired` for that calendar and the events disappear until you sign in again. Publishing the app is what makes the connection permanent. If your Google account belongs to a Workspace organisation (school or company), choosing User Type **Internal** has the same effect.
+
 4. Create Credentials (<https://console.cloud.google.com/apis/credentials>):
    - Click **+ Create Credentials $\rightarrow$ OAuth client ID**.
    - Set Application type strictly to **Desktop app** *(do not select "Web application")*.
@@ -219,6 +224,7 @@ python3 ~/.config/omarchy/plugins/promaa.clock/google-auth.py
 #### Troubleshooting
 * **`Error 400: redirect_uri_mismatch`**: Make sure the credential type is set to **Desktop app**, not Web application.
 * **`Access blocked: App has not completed verification`**: Add your Google account email to **Test users** in the OAuth consent screen.
+* **Calendar disconnects every ~7 days / status `auth_expired`**: Your OAuth app is in **Testing** publishing status, so Google revokes the refresh token weekly. Set the app to **In production** (see step 1 above), then click **Reconnect** in the plugin settings or run `google-auth.py` once more. The plugin sends a desktop notification the first time Google rejects the saved login.
 * **`HTTP Error 404: Not Found`**: Check that the `googleCalendarId` is the exact Calendar ID (not the display name). Test the sync with `python3 ~/.config/omarchy/plugins/promaa.clock/fetch-events.py`.
 
 

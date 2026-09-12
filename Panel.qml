@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -12,6 +13,16 @@ Panel {
   moduleName: "promaa.clock"
   ipcTarget: "promaa.clock"
   manageIpc: false
+
+  Connections {
+    target: Hyprland
+    function onFocusedWorkspaceChanged() {
+      if (root.opened) root.close()
+    }
+    function onFocusedMonitorChanged() {
+      if (root.opened) root.close()
+    }
+  }
 
   property var anchorItem: null
 
@@ -158,6 +169,10 @@ Panel {
   property string settingsTab: "preferences"
   property var configuredCalendars: Model.parseCalendarsConfig(configFile.text())
   readonly property bool isGoogleAuthenticated: eventsData.authenticated === true
+  // Non-null while a Google API calendar is stuck on an auth_expired /
+  // auth_required status; drives the reconnect banner and the settings row.
+  readonly property var googleAuthIssue: Model.googleAuthIssue(root.configuredCalendars, root.activeCalendars)
+  readonly property bool googleAuthRunning: googleAuthProc.running
 
   property bool addingCalendar: false
   property string formName: ""
@@ -329,6 +344,8 @@ Panel {
     // Dismissing the panel mid-edit would otherwise leave the inputs up,
     // waiting behind a closed popup for the next time it opens.
     if (root.editingLife) root.cancelEditingLife()
+    root.closeAddEvent()
+    root.closeSettings()
     root.controller.hide()
   }
 
@@ -346,7 +363,9 @@ Panel {
   // Summoning by hotkey moves no pointer, so a hover the bar was still
   // holding must not keep the center indicators revealed behind the panel.
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
@@ -715,14 +734,24 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: root.editingLife || root.showingSettings || root.addingEvent
+      readonly property bool hasActiveInput: (bornField && bornField.activeFocus) ||
+                                            (expectancyField && expectancyField.activeFocus) ||
+                                            (calNameInput && calNameInput.activeFocus) ||
+                                            (calAddressInput && calAddressInput.activeFocus) ||
+                                            (calJmapUrlInput && calJmapUrlInput.activeFocus) ||
+                                            (calJmapTokenInput && calJmapTokenInput.activeFocus) ||
+                                            (eventTitleInput && eventTitleInput.activeFocus) ||
+                                            (eventLocInput && eventLocInput.activeFocus) ||
+                                            (eventDescInput && eventDescInput.activeFocus)
+      blocked: root.editingLife || hasActiveInput
       onMoveRequested: function(dx, dy) {
         if (dx !== 0) root.moveMonth(dx)
         if (dy !== 0) root.moveYear(dy)
       }
       onActivateRequested: root.goToToday()
       onCloseRequested: {
-        if (root.addingEvent) root.closeAddEvent()
+        if (root.addingCalendar) root.addingCalendar = false
+        else if (root.addingEvent) root.closeAddEvent()
         else if (root.showingSettings) root.closeSettings()
         else root.close()
       }
@@ -1425,6 +1454,64 @@ Panel {
 
             }
 
+            // ---- Google login warning: stays until the account is reconnected ----
+            Rectangle {
+              id: googleAuthBanner
+              visible: root.googleAuthIssue !== null && !root.addingEvent
+              width: parent.width
+              height: visible ? (googleAuthBannerText.implicitHeight + Style.space(20)) : 0
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.contentForeground, Color.accent)
+              border.width: 1
+              border.color: Color.accent
+
+              Row {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(8)
+
+                Text {
+                  id: googleAuthBannerIcon
+                  textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "󰀦"
+                  color: Color.accent
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.icon
+                }
+
+                Text {
+                  id: googleAuthBannerText
+                  textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - googleAuthBannerIcon.width - Style.space(8)
+                  wrapMode: Text.WordWrap
+                  text: root.googleAuthRunning
+                    ? "Waiting for the Google sign-in to finish in your browser..."
+                    : Model.googleAuthIssueText(root.googleAuthIssue)
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              MouseArea {
+                id: googleAuthBannerMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openGoogleAuth()
+              }
+
+              PanelToolTip {
+                visible: googleAuthBannerMouse.containsMouse
+                text: "Opens the Google sign-in page in your browser"
+                fontFamily: root.contentFontFamily
+              }
+            }
             // ---- Add Event Modal / Form Card ----
             Rectangle {
               visible: root.addingEvent
@@ -1986,7 +2073,10 @@ Panel {
                           hoverEnabled: Boolean(modelData.meetingUrl)
                           cursorShape: modelData.meetingUrl ? Qt.PointingHandCursor : Qt.ArrowCursor
                           onClicked: {
-                            if (modelData.meetingUrl) root.openExternalUrl(modelData.meetingUrl)
+                            if (modelData.meetingUrl) {
+                              root.openExternalUrl(modelData.meetingUrl)
+                              root.close()
+                            }
                           }
                         }
                       }
@@ -2037,7 +2127,10 @@ Panel {
                           anchors.fill: parent
                           hoverEnabled: true
                           cursorShape: Qt.PointingHandCursor
-                          onClicked: root.openExternalUrl(modelData.meetingUrl)
+                          onClicked: {
+                            root.openExternalUrl(modelData.meetingUrl)
+                            root.close()
+                          }
                         }
 
                         PanelToolTip {
@@ -2651,7 +2744,7 @@ Panel {
                   // Name & Details
                   Column {
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - Style.space(140)
+                    width: parent.width - Style.space(modelData.googleCalendarId ? 170 : 140)
                     spacing: Style.space(2)
 
                     Row {
@@ -2676,13 +2769,33 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: (modelData.type === "jmap" || modelData.jmapToken) ? (modelData.jmapUrl || "JMAP Feed") : (modelData.googleCalendarId || modelData.url || "No address")
-                      color: Qt.darker(root.contentForeground, 1.9)
+                      readonly property bool loginProblem: !!modelData.googleCalendarId
+                        && root.googleAuthIssue !== null
+                        && root.googleAuthIssue.names.indexOf(String(modelData.name || "")) >= 0
+                      text: loginProblem
+                        ? (root.googleAuthRunning
+                            ? "Waiting for Google sign-in..."
+                            : (root.googleAuthIssue.kind === "expired"
+                                ? "Google login expired - click 󰌆 to reconnect"
+                                : "Google login required - click 󰌆 to connect"))
+                        : ((modelData.type === "jmap" || modelData.jmapToken) ? (modelData.jmapUrl || "JMAP Feed") : (modelData.googleCalendarId || modelData.url || "No address"))
+                      color: loginProblem ? Color.accent : Qt.darker(root.contentForeground, 1.9)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
                       elide: Text.ElideMiddle
                       width: parent.width
                     }
+                  }
+
+                  // Reconnect Google account (Google API calendars only)
+                  PanelActionButton {
+                    visible: !!modelData.googleCalendarId
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "󰌆"
+                    tooltipText: root.googleAuthRunning ? "Waiting for Google sign-in..." : "Reconnect Google account"
+                    foreground: (root.googleAuthIssue !== null) ? Color.accent : root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    onClicked: root.openGoogleAuth()
                   }
 
                   // Delete button

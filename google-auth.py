@@ -347,6 +347,11 @@ def main():
         print("SUCCESS! Google OAuth credentials saved to:")
         print(f"  {AUTH_FILE}")
         print("=" * 60)
+        print()
+        print("Tip: if this login stops working after about 7 days, your OAuth app is")
+        print("still in 'Testing' publishing status. In Google Cloud Console open")
+        print("Google Auth Platform -> Audience and click 'Publish app' (In production).")
+        print("Refresh tokens then stop expiring and you will not need to sign in again.")
 
     except Exception as e:
         print("Failed to exchange tokens:", e)

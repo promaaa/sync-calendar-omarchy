@@ -1,6 +1,6 @@
 # Calendar Sync Clock for Omarchy
 
-**Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way: create and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
+**Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way on Google, JMAP and CalDAV (iCloud, Nextcloud): create and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
 
 ```bash
 omarchy plugin add https://github.com/promaaa/sync-calendar-omarchy.git --enable --yes
@@ -23,7 +23,7 @@ Works with the stock Omarchy Quattro bar and with Shibumi Shell. Python 3 standa
 
 ## Features
 
-- **Two-Way Event Sync & Creation**: Add (`󰐕` or `n` hotkey) and delete (`󰆴`) events directly from your desktop into writable calendars (**Google Calendar API**, **JMAP / Fastmail / Stalwart**, and **Local Offline Calendars**).
+- **Two-Way Event Sync & Creation**: Add (`󰐕` or `n` hotkey) and delete (`󰆴`) events directly from your desktop into writable calendars (**Google Calendar API**, **JMAP / Fastmail / Stalwart**, **CalDAV / Apple iCloud / Nextcloud**, and **Local Offline Calendars**).
 - **Universal iCalendar & JMAP Support**: Compatible with any calendar service providing an `.ics` / `webcal://` link (Google, Apple iCloud, Proton, Outlook / Office 365, Nextcloud, generic iCal) or modern **JMAP** API (Fastmail, Stalwart, Cyrus IMAP, Apache James).
 - **Offline Local Calendar**: Create and manage local events stored in `~/.local/state/omarchy/local-events.json` without needing any external cloud account.
 - **One-Click "Join Meeting"**: Automatically detects Google Meet, Zoom, Microsoft Teams, Webex, and Jitsi links in event details and displays an instant join button.
@@ -123,6 +123,9 @@ Configure your calendar feeds and preferences using the in-app **Settings Menu (
   {
     "name": "Apple iCloud",
     "url": "webcal://pXX-caldav.icloud.com/published/2/xxxxxxxx",
+    "caldavUrl": "https://pXX-caldav.icloud.com/1234567890/calendars/home/",
+    "username": "you@icloud.com",
+    "password": "xxxx-xxxx-xxxx-xxxx",
     "color": "#30d158",
     "enabled": true
   },
@@ -154,6 +157,31 @@ Edits to `calendars.json` hot-reload automatically without restarting the shell.
 1. Open [iCloud Calendar](https://www.icloud.com/calendar) or Apple Calendar on macOS / iOS.
 2. Click the **Share** icon next to the calendar $\rightarrow$ Turn on **Public Calendar** (or share link).
 3. Copy the `webcal://...` link.
+
+That published link is read-only: it shows your events but cannot accept new ones.
+To also **create and delete iCloud events** from the panel, add CalDAV credentials
+to the same entry:
+
+1. Create an app-specific password at [appleid.apple.com](https://appleid.apple.com/)
+   $\rightarrow$ **Sign-In and Security** $\rightarrow$ **App-Specific Passwords**.
+   Your Apple ID password will not work.
+2. Put your Apple ID and that password on the calendar entry as `"username"` and
+   `"password"`, then ask the plugin for your collection URLs:
+
+   ```bash
+   ~/.config/omarchy/plugins/promaa.clock/fetch-events.py --caldav-discover "Apple iCloud"
+   ```
+
+3. Copy the `caldavUrl` of the calendar you want to write to into the entry.
+
+The same three fields work for any CalDAV server (Nextcloud, Radicale, Baïkal,
+Zimbra); only the discovery starting point differs, so set `caldavUrl` to the
+server root (e.g. `https://nextcloud.example.com/remote.php/dav/`) before running
+discovery. HTTPS is required — the credentials are never sent over plain HTTP, and
+a redirect off the calendar's own host is refused.
+
+Since `calendars.json` then holds a password, keep it private: `chmod 600
+~/.config/omarchy/calendars.json` (the plugin writes it that way itself).
 
 ### Proton Calendar
 1. Open [Proton Calendar](https://calendar.proton.me/) on the web.

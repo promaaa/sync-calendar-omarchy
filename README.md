@@ -1,4 +1,4 @@
-# Calendar Sync Clock for Omarchy
+# Chronica — calendar & clock for Omarchy
 
 **Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way on Google, JMAP and CalDAV (iCloud, Nextcloud): create and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
 
@@ -89,7 +89,7 @@ duplicate clock.
 2. Open **Plugins** and select **Add plugin**.
 3. Paste `https://github.com/promaaa/sync-calendar-omarchy.git`.
 4. Acknowledge the third-party plugin warning, install it, and activate
-   **Calendar Sync Clock** in the plugin catalog.
+   **Chronica** in the plugin catalog.
 
 The calendar configuration and cached event paths remain under Omarchy's XDG
 directories because Shibumi runs inside the existing Omarchy Shell process.

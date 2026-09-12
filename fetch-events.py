@@ -2355,7 +2355,7 @@ def delete_jmap_event(cal_info, event_id):
 # there (appleid.apple.com), never the Apple ID password itself.
 
 CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
-CALDAV_PRODID = "-//Omarchy//Calendar Sync Clock//EN"
+CALDAV_PRODID = "-//Omarchy//Chronica//EN"
 CALDAV_DEFAULT_HOST = "https://caldav.icloud.com/"
 
 

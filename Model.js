@@ -468,6 +468,14 @@ function getWritableCalendars(configuredList) {
         calendarId: c.jmapCalendarId || c.calendarId || "primary",
         writable: true
       })
+    } else if (c.caldavUrl && c.username && c.password) {
+      writables.push({
+        name: c.name || "CalDAV Calendar",
+        type: "caldav",
+        color: c.color || "#4A90E2",
+        calendarId: c.caldavUrl,
+        writable: true
+      })
     } else if (c.googleCalendarId || (c.calendarId && !c.url)) {
       writables.push({
         name: c.name || "Google Calendar",

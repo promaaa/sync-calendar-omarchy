@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import re
+import base64
 import secrets
 import stat
 import time
@@ -20,6 +21,8 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, date, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 
 try:
     from zoneinfo import ZoneInfo
@@ -960,6 +963,9 @@ def parse_ics(content, cal_info, window_start, window_end):
                     current["exdates"].append(ex_dt.strftime("%Y-%m-%d"))
 
     auto_translate = cal_info.get("translateKorean", False)
+    # A subscription feed is read-only; the same calendar becomes writable as
+    # soon as the entry also carries CalDAV credentials for the collection.
+    can_write = has_caldav_write(cal_info)
     normalized = []
     for raw in raw_events:
         start_dt = raw.get("DTSTART")
@@ -989,6 +995,9 @@ def parse_ics(content, cal_info, window_start, window_end):
             "location": location,
             "description": description,
             "calendar": cal_info.get("name", "Calendar"),
+            "calendarId": cal_info.get("caldavUrl", "") if can_write else "",
+            "calendarType": "caldav" if can_write else "ical",
+            "writable": can_write,
             "color": cal_info.get("color", "#4A90E2"),
             "all_day": all_day,
             "start_dt": start_dt,
@@ -1029,6 +1038,7 @@ GOOGLE_AUTH_EXPIRED_HINT = (
     "Open the calendar panel and click Reconnect. If this happens every "
     "week, publish your OAuth app (In production) in Google Cloud Console."
 )
+
 
 def _notify_desktop(title, body):
     """Best-effort desktop notification; never raises, never blocks the sync."""
@@ -1367,6 +1377,8 @@ def fetch_calendar(cal_info, window_start, window_end):
         return {
             "name": name,
             "color": cal_info.get("color", "#4A90E2"),
+            "type": "caldav" if has_caldav_write(cal_info) else "ical",
+            "writable": has_caldav_write(cal_info),
             "events": events,
             "status": "ok",
             "count": len(events),
@@ -1435,28 +1447,28 @@ def parse_jmap_datetime(dt_str, tzid=None):
         return datetime.now()
 
 
-def validate_jmap_https_url(url, trusted_origin=None):
+def validate_jmap_https_url(url, trusted_origin=None, label="JMAP"):
     """Return a validated credential-free HTTPS URL and its canonical origin."""
     if not isinstance(url, str) or not url or any(ord(char) < 0x20 for char in url) or "\\" in url:
-        raise ValueError("JMAP URL is invalid")
+        raise ValueError(f"{label} URL is invalid")
     try:
         parsed = urllib.parse.urlsplit(url)
         port = parsed.port
     except ValueError as exc:
-        raise ValueError("JMAP URL is invalid") from exc
+        raise ValueError(f"{label} URL is invalid") from exc
     if parsed.scheme.lower() != "https" or not parsed.hostname:
-        raise ValueError("JMAP URL must use HTTPS")
+        raise ValueError(f"{label} URL must use HTTPS")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("JMAP URL must not contain credentials")
+        raise ValueError(f"{label} URL must not contain credentials")
     if parsed.fragment:
-        raise ValueError("JMAP URL must not contain a fragment")
+        raise ValueError(f"{label} URL must not contain a fragment")
     try:
         hostname = parsed.hostname.rstrip(".").encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
-        raise ValueError("JMAP URL hostname is invalid") from exc
+        raise ValueError(f"{label} URL hostname is invalid") from exc
     origin = ("https", hostname, port or 443)
     if trusted_origin is not None and origin != trusted_origin:
-        raise ValueError("JMAP URL must remain on the configured session origin")
+        raise ValueError(f"{label} URL must remain on the configured session origin")
     return url, origin
 
 
@@ -2335,6 +2347,313 @@ def delete_jmap_event(cal_info, event_id):
     return {"status": "success", "id": event_id}
 
 
+# ---- CalDAV (RFC 4791) push -------------------------------------------------
+# Reading an iCloud / Nextcloud / Radicale calendar only needs its published
+# .ics feed, which is anonymous and read-only. Writing needs the real collection
+# URL plus credentials, so an entry becomes a push target only once "caldavUrl",
+# "username" and "password" are all set. Apple wants an app-specific password
+# there (appleid.apple.com), never the Apple ID password itself.
+
+CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
+CALDAV_PRODID = "-//Omarchy//Calendar Sync Clock//EN"
+CALDAV_DEFAULT_HOST = "https://caldav.icloud.com/"
+
+
+def has_caldav_write(cal_info):
+    """True when a calendar entry carries everything needed to push events."""
+    if not isinstance(cal_info, dict):
+        return False
+    return bool(
+        str(cal_info.get("caldavUrl") or "").strip()
+        and str(cal_info.get("username") or "").strip()
+        and str(cal_info.get("password") or "")
+    )
+
+
+def caldav_auth(cal_info, raw_url):
+    """Validate one account + URL into (url, origin, authorization header)."""
+    user = str(cal_info.get("username") or "").strip()
+    password = str(cal_info.get("password") or "")
+    if not user or not password:
+        raise ValueError(
+            f"Calendar '{cal_info.get('name')}' has no CalDAV credentials: set "
+            '"username" and "password" on it to push events.'
+        )
+    # Basic auth is one header line, and ":" separates its two halves, so a
+    # crafted config must not be able to smuggle either past the boundary.
+    if ":" in user or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in user + password):
+        raise ValueError("CalDAV username or password contains an invalid character")
+
+    url = str(raw_url or "").strip()
+    if "://" not in url:
+        url = "https://" + url
+    url, origin = validate_jmap_https_url(url, label="CalDAV")
+    if not url.endswith("/"):
+        url += "/"
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    return url, origin, "Basic " + token
+
+
+def caldav_credentials(cal_info):
+    """Same as caldav_auth, against the configured collection URL."""
+    raw_url = str(cal_info.get("caldavUrl") or "").strip()
+    if not raw_url:
+        raise ValueError(
+            f"Calendar '{cal_info.get('name')}' is a read-only subscription feed. "
+            'Set "caldavUrl" (run --caldav-discover to list yours) to push events to it.'
+        )
+    return caldav_auth(cal_info, raw_url)
+
+
+def caldav_request(origin, auth_header, method, url, body=None, headers=None):
+    """One authenticated CalDAV request, pinned to the account's own origin."""
+    url, _ = validate_jmap_https_url(url, origin, label="CalDAV")
+    data = body.encode("utf-8") if isinstance(body, str) else body
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("Authorization", auth_header)
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(origin))
+    with open_trusted_jmap(opener, req, origin, timeout=15) as resp:
+        raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+        return getattr(resp, "status", 200), raw.decode("utf-8", errors="ignore")
+
+
+def caldav_error(exc, cal_info):
+    """Turn an HTTP failure into something a panel user can act on."""
+    name = cal_info.get("name", "CalDAV calendar")
+    if exc.code in (401, 403):
+        return (f"{name} rejected the credentials. Apple iCloud needs an app-specific "
+                "password from appleid.apple.com, not your Apple ID password.")
+    if exc.code == 404:
+        return f'{name}: CalDAV collection not found - check "caldavUrl".'
+    if exc.code == 507:
+        return f"{name}: the server has no storage left for this calendar."
+    return f"{name}: CalDAV server returned HTTP {exc.code}."
+
+
+def ics_escape(value):
+    """Escape a text value for an iCalendar content line (RFC 5545 3.3.11)."""
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def ics_fold(line):
+    """Fold a content line to the 75-octet limit, never mid-character."""
+    if len(line.encode("utf-8")) <= 75:
+        return line
+    folded = []
+    current = ""
+    for char in line:
+        if len((current + char).encode("utf-8")) > 75:
+            folded.append(current)
+            current = " " + char
+        else:
+            current += char
+    folded.append(current)
+    return "\r\n".join(folded)
+
+
+def ics_utc_stamp(dt):
+    """Naive local (or aware) datetime -> iCalendar UTC stamp, DST included."""
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def build_vevent(event_data, uid):
+    """Serialize one event as a single-VEVENT iCalendar object."""
+    start = parse_iso_or_local(event_data.get("start"))
+    end = parse_iso_or_local(event_data.get("end") or event_data.get("start"))
+
+    if bool(event_data.get("allDay", False)):
+        # DTEND is exclusive for DATE values while the panel sends the last day
+        # the event covers, so the stored end is always one day further out.
+        if end.date() < start.date():
+            end = start
+        end = end + timedelta(days=1)
+        when = [
+            "DTSTART;VALUE=DATE:" + start.strftime("%Y%m%d"),
+            "DTEND;VALUE=DATE:" + end.strftime("%Y%m%d"),
+        ]
+    else:
+        if end <= start:
+            end = start + timedelta(hours=1)
+        # UTC stamps keep the event unambiguous without shipping a VTIMEZONE.
+        when = ["DTSTART:" + ics_utc_stamp(start), "DTEND:" + ics_utc_stamp(end)]
+
+    title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:" + CALDAV_PRODID,
+        "CALSCALE:GREGORIAN",
+        "BEGIN:VEVENT",
+        "UID:" + uid,
+        "DTSTAMP:" + ics_utc_stamp(datetime.now(timezone.utc)),
+        "SUMMARY:" + ics_escape(title),
+    ]
+    lines.extend(when)
+    location = ics_escape(str(event_data.get("location", "")).strip())
+    description = ics_escape(str(event_data.get("description", "")).strip())
+    if location:
+        lines.append("LOCATION:" + location)
+    if description:
+        lines.append("DESCRIPTION:" + description)
+    lines.extend(["END:VEVENT", "END:VCALENDAR"])
+    return "\r\n".join(ics_fold(line) for line in lines) + "\r\n"
+
+
+def create_caldav_event(cal_info, event_data):
+    """Create an event on a CalDAV collection (Apple iCloud, Nextcloud, ...)."""
+    if not str(event_data.get("start", "")).strip():
+        raise ValueError("Event must have a start date/time")
+
+    url, origin, auth = caldav_credentials(cal_info)
+    uid = f"omarchy-{int(time.time())}-{secrets.token_hex(8)}"
+    href = url + urllib.parse.quote(uid, safe="") + ".ics"
+    try:
+        caldav_request(
+            origin, auth, "PUT", href, build_vevent(event_data, uid),
+            headers={
+                "Content-Type": "text/calendar; charset=utf-8",
+                "If-None-Match": "*",
+            },
+        )
+    except urllib.error.HTTPError as exc:
+        raise ValueError(caldav_error(exc, cal_info)) from exc
+
+    return {
+        "status": "success",
+        "id": uid,
+        "event": {
+            "id": uid,
+            "title": str(event_data.get("title", "")).strip() or "(Untitled Event)",
+            "start": str(event_data.get("start", "")),
+            "end": str(event_data.get("end", "")),
+            "allDay": bool(event_data.get("allDay", False)),
+            "location": str(event_data.get("location", "")).strip(),
+            "description": str(event_data.get("description", "")).strip(),
+            "calendar": cal_info.get("name", "CalDAV Calendar"),
+        },
+    }
+
+
+CALDAV_UID_QUERY = """<?xml version="1.0" encoding="utf-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="{ns}">
+  <d:prop><d:getetag/></d:prop>
+  <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+    <c:prop-filter name="UID"><c:text-match>{uid}</c:text-match></c:prop-filter>
+  </c:comp-filter></c:comp-filter></c:filter>
+</c:calendar-query>"""
+
+
+def caldav_find_href(url, origin, auth, uid):
+    """Locate an event whose resource is not named after its UID."""
+    body = CALDAV_UID_QUERY.format(ns=CALDAV_NS, uid=xml_escape(str(uid)))
+    try:
+        _, text = caldav_request(
+            origin, auth, "REPORT", url, body,
+            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+        )
+        tree = ET.fromstring(text)
+    except (urllib.error.HTTPError, ET.ParseError):
+        return None
+    for href in tree.iter("{DAV:}href"):
+        found = (href.text or "").strip()
+        if found.lower().endswith(".ics"):
+            return urllib.parse.urljoin(url, found)
+    return None
+
+
+def delete_caldav_event(cal_info, event_id):
+    """Delete an event from a CalDAV collection."""
+    url, origin, auth = caldav_credentials(cal_info)
+    href = url + urllib.parse.quote(str(event_id), safe="") + ".ics"
+    try:
+        caldav_request(origin, auth, "DELETE", href)
+        return {"status": "success", "id": event_id}
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (404, 410):
+            raise ValueError(caldav_error(exc, cal_info)) from exc
+
+    # Events written by Apple Calendar itself live at a server-chosen href
+    # rather than <uid>.ics, so fall back to asking the server where it is.
+    found = caldav_find_href(url, origin, auth, event_id)
+    if not found:
+        name = cal_info.get("name", "the CalDAV calendar")
+        return {"status": "error", "message": f"Event '{event_id}' not found on {name}"}
+    try:
+        caldav_request(origin, auth, "DELETE", found)
+    except urllib.error.HTTPError as exc:
+        raise ValueError(caldav_error(exc, cal_info)) from exc
+    return {"status": "success", "id": event_id}
+
+
+CALDAV_PROPFIND = """<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="{ns}"><d:prop>{props}</d:prop></d:propfind>"""
+
+
+def caldav_propfind(url, origin, auth, props, depth="0"):
+    _, text = caldav_request(
+        origin, auth, "PROPFIND", url, CALDAV_PROPFIND.format(ns=CALDAV_NS, props=props),
+        headers={"Content-Type": "application/xml; charset=utf-8", "Depth": depth},
+    )
+    return ET.fromstring(text)
+
+
+def caldav_prop_href(tree, tag, base):
+    """Absolute URL of the href nested inside the first matching property."""
+    for node in tree.iter(tag):
+        for href in node.iter("{DAV:}href"):
+            if (href.text or "").strip():
+                return urllib.parse.urljoin(base, href.text.strip())
+    return None
+
+
+def caldav_discover(cal_info):
+    """List an account's calendar collections, for pasting into "caldavUrl"."""
+    base = str(cal_info.get("caldavUrl") or "").strip() or CALDAV_DEFAULT_HOST
+    url, origin, auth = caldav_auth(cal_info, base)
+    try:
+        principal = caldav_prop_href(
+            caldav_propfind(url, origin, auth, "<d:current-user-principal/>"),
+            "{DAV:}current-user-principal", url,
+        )
+        if not principal:
+            raise ValueError("Server returned no user principal - check the username and password.")
+        home = caldav_prop_href(
+            caldav_propfind(principal, origin, auth, "<c:calendar-home-set/>"),
+            "{%s}calendar-home-set" % CALDAV_NS, principal,
+        )
+        if not home:
+            raise ValueError("Server returned no calendar home for this account.")
+        tree = caldav_propfind(home, origin, auth, "<d:displayname/><d:resourcetype/>", depth="1")
+    except urllib.error.HTTPError as exc:
+        raise ValueError(caldav_error(exc, cal_info)) from exc
+
+    collections = []
+    for response in tree.iter("{DAV:}response"):
+        if response.find(".//{DAV:}resourcetype/{%s}calendar" % CALDAV_NS) is None:
+            continue
+        href = response.find("{DAV:}href")
+        if href is None or not (href.text or "").strip():
+            continue
+        name = response.find(".//{DAV:}displayname")
+        collections.append({
+            "name": (name.text or "").strip() if name is not None else "",
+            "caldavUrl": urllib.parse.urljoin(home, href.text.strip()),
+        })
+    return collections
+
+
 def find_calendar_config(cal_name_or_id):
     """Find calendar entry matching name or ID from config, or default to local."""
     ensure_config_exists()
@@ -2367,6 +2686,8 @@ def create_event(event_data):
         res = create_local_event(cal_info, event_data)
     elif cal_type == "jmap" or cal_info.get("jmapToken"):
         res = create_jmap_event(cal_info, event_data)
+    elif cal_type == "caldav" or has_caldav_write(cal_info):
+        res = create_caldav_event(cal_info, event_data)
     elif cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("url")):
         res = create_google_event(cal_info, event_data)
     else:
@@ -2393,6 +2714,8 @@ def delete_event(delete_data):
                 cal_type = "google"
             elif cal_info.get("jmapToken"):
                 cal_type = "jmap"
+            elif has_caldav_write(cal_info):
+                cal_type = "caldav"
             else:
                 cal_type = "local"
     else:
@@ -2402,6 +2725,8 @@ def delete_event(delete_data):
         res = delete_local_event(cal_info, event_id)
     elif cal_type == "jmap":
         res = delete_jmap_event(cal_info, event_id)
+    elif cal_type == "caldav":
+        res = delete_caldav_event(cal_info, event_id)
     elif cal_type == "google":
         res = delete_google_event(cal_info, event_id)
     else:
@@ -2435,6 +2760,14 @@ def get_writable_calendars():
                 "type": "jmap",
                 "color": c.get("color", "#ff7700"),
                 "calendarId": c.get("jmapCalendarId") or c.get("calendarId") or "primary",
+                "writable": True,
+            })
+        elif has_caldav_write(c):
+            writables.append({
+                "name": c.get("name", "CalDAV Calendar"),
+                "type": "caldav",
+                "color": c.get("color", "#4A90E2"),
+                "calendarId": c.get("caldavUrl", ""),
                 "writable": True,
             })
         elif c.get("googleCalendarId") or (c.get("calendarId") and not c.get("url")):
@@ -2689,6 +3022,14 @@ def main():
                     res = delete_event(delete_data)
                     print(json.dumps(res, ensure_ascii=False))
                     sys.exit(0 if res.get("status") == "success" else 1)
+                except Exception as e:
+                    print(json.dumps({"status": "error", "message": str(e)}))
+                    sys.exit(1)
+            elif arg == "--caldav-discover":
+                try:
+                    target = sys.argv[2] if len(sys.argv) > 2 else ""
+                    print(json.dumps(caldav_discover(find_calendar_config(target)), ensure_ascii=False, indent=2))
+                    sys.exit(0)
                 except Exception as e:
                     print(json.dumps({"status": "error", "message": str(e)}))
                     sys.exit(1)

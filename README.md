@@ -1,4 +1,4 @@
-# Chronica — calendar & clock for Omarchy
+# Chronica - calendar & clock for Omarchy
 
 **Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way on Google, JMAP and CalDAV (iCloud, Nextcloud): create and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
 
@@ -177,7 +177,7 @@ to the same entry:
 The same three fields work for any CalDAV server (Nextcloud, Radicale, Baïkal,
 Zimbra); only the discovery starting point differs, so set `caldavUrl` to the
 server root (e.g. `https://nextcloud.example.com/remote.php/dav/`) before running
-discovery. HTTPS is required — the credentials are never sent over plain HTTP, and
+discovery. HTTPS is required, the credentials are never sent over plain HTTP, and
 a redirect off the calendar's own host is refused.
 
 Since `calendars.json` then holds a password, keep it private: `chmod 600
@@ -217,7 +217,7 @@ JMAP is a modern, fast, JSON-based calendar standard ([RFC 9670](https://www.rfc
 ### Google Calendar API (Restricted Shared Calendars)
 
 > [!TIP]
-> **For your own calendars**, use the **Secret address in iCal format** above — it requires zero API setup.
+> **For your own calendars**, use the **Secret address in iCal format** above, it requires zero API setup.
 > The Google Calendar API is only needed for shared or organization calendars where iCal export is restricted.
 
 #### 1. Setup Google Cloud Project & Credentials

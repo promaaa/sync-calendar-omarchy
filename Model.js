@@ -236,7 +236,7 @@ function ageFromBirthYear(birthYear, currentYear) {
 }
 
 // 0 means "not set", which is also what a blank, negative, fractional, or
-// absurd entry means — the life bar simply stays hidden.
+// absurd entry means, the life bar simply stays hidden.
 function parseAge(value) {
   var text = String(value === undefined || value === null ? "" : value).replace(/^\s+|\s+$/g, "")
   if (!/^\d+$/.test(text)) return 0

@@ -7,8 +7,8 @@ import "Model.js" as Model
 
 // Date/time label for the bar, and the host for the calendar popup.
 //
-// Left click reveals the calendar — asking "what is the date?" is what a
-// click on a clock means — right click walks the common label formats, and
+// Left click reveals the calendar, asking "what is the date?" is what a
+// click on a clock means. Right click walks the common label formats, and
 // middle click opens the timezone picker.
 BarWidget {
   id: root
@@ -85,7 +85,7 @@ BarWidget {
   // The clock fills more slot than it paints a mark for, at both
   // orientations: horizontally it is a text label in a padded slot, so the
   // dot takes the label width; vertically it is a stack of icon-sized lines,
-  // so the dot takes one line — the same mark every icon widget gets, rather
+  // so the dot takes one line, the same mark every icon widget gets, rather
   // than a rule running the height of the whole stack.
   readonly property real openPanelIndicatorWidth: button.labelWidth
   readonly property real openPanelIndicatorHeight: Math.max(Style.space(10), Math.round(Style.bar.iconSlot * 0.55))

@@ -26,7 +26,7 @@ Panel {
 
   property var anchorItem: null
 
-  // The bar tracks the widget mounted in its slot — BarWidget.qml — not this
+  // The bar tracks the widget mounted in its slot, BarWidget.qml, not this
   // nested panel. Everything the bar identifies a panel by has to be that
   // widget: the popout coordinator (and with it the open-panel dot under the
   // pill) compares against `slot.activeItem`, and switchPanelFrom looks the
@@ -287,7 +287,7 @@ Panel {
   readonly property bool viewingCurrentMonth: viewYear === today.getFullYear() && viewMonth === today.getMonth()
 
 
-  // Pinned to today, not to the month being browsed — stepping through the
+  // Pinned to today, not to the month being browsed. Stepping through the
   // calendar does not change how much of the year is gone.
   readonly property real yearDone: Model.yearProgress(today.getFullYear(), today.getMonth(), today.getDate())
   readonly property int yearDonePercent: Model.yearProgressPercent(today.getFullYear(), today.getMonth(), today.getDate())
@@ -790,7 +790,7 @@ Panel {
             spacing: Style.space(8)
 
             // ---- Hero: today, centered. Once the view has stepped back
-            //      it is also the way home — clicking the date you are
+            //      it is also the way home, clicking the date you are
             //      looking for beats hunting for a reset button.
             Item {
               width: parent.width

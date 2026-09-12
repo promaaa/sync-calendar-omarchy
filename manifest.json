@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "promaa.clock",
-  "name": "Calendar Sync Clock",
-  "version": "1.3.2",
+  "name": "Chronica",
+  "version": "1.4.0",
   "author": "promaaa",
   "license": "MIT",
-  "description": "Date/time label with an interactive calendar popup, two-way event sync & push, and universal iCalendar (.ics / webcal) & JMAP sync",
+  "description": "Date/time label with an interactive calendar popup, two-way event sync & push over Google, JMAP and CalDAV, and universal iCalendar (.ics / webcal) sync",
   "kinds": [
     "bar-widget"
   ],
@@ -16,8 +16,8 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Calendar & Clock",
-    "description": "Date/time status bar widget with synced Google, Apple iCloud, Proton, Outlook, Nextcloud, Fastmail (JMAP / iCal), and generic iCalendar agenda",
+    "displayName": "Chronica",
+    "description": "Date/time status bar widget with synced Google, Apple iCloud, Proton, Outlook, Nextcloud, Fastmail (JMAP / iCal), and generic iCalendar agenda, writing back to Google, JMAP and CalDAV",
 
     "category": "Productivity",
     "allowMultiple": false,

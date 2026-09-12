@@ -10,16 +10,16 @@ omarchy plugin add https://github.com/promaaa/sync-calendar-omarchy.git --enable
 ![GitHub stars](https://img.shields.io/github/stars/promaaa/sync-calendar-omarchy?style=flat-square)
 ![License](https://img.shields.io/github/license/promaaa/sync-calendar-omarchy?style=flat-square)
 
-Works with the stock Omarchy Quattro bar and with Shibumi Shell. Python 3 standard library only, no pip packages, no daemon, no sudo.
+Follows your Omarchy theme (the shots below are three different ones). Works with the stock Omarchy Quattro bar and with Shibumi Shell. Python 3 standard library only, no pip packages, no daemon, no sudo.
 
-![Global desktop view](global-view.jpg)
+![The calendar panel open on an Omarchy desktop](full-preview.webp)
 
 ## Gallery
 
 | Preview | View |
 | --- | --- |
-| ![Calendar panel with several events in one day](close-view1.png) | Zoomed calendar view |
-| ![Preferences menu](close-view2.png) | Preferences menu |
+| ![Creating an event and picking which calendar it lands in](add-event.webp) | Add an event, straight into iCloud, Google, JMAP or the local calendar |
+| ![Plugin settings](settings.webp) | Preferences: clock format, sync interval, reminders, meeting join, first day of week |
 
 ## Features
 

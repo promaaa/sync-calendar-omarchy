@@ -1941,6 +1941,267 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
         }
 
 
+# TimeTree has no public export; every read and write goes through the same
+# private web API the mobile/web app uses (email+password login -> session
+# cookie, plus a CSRF token scraped from the home page for writes).
+TIMETREE_BASE_URL = "https://timetreeapp.com/api/v1"
+TIMETREE_AUTH_URL = f"{TIMETREE_BASE_URL}/auth/email/signin"
+TIMETREE_HOME_URL = "https://timetreeapp.com/"
+TIMETREE_HEADERS = {"Content-Type": "application/json", "X-Timetreea": "web/2.1.0/en"}
+# The password never touches calendars.json: it lives only in the system
+# keyring (libsecret), looked up by this helper on demand. See bin/omarchy-calendar-secret.
+TIMETREE_SECRET_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "omarchy-calendar-secret")
+
+
+def timetree_secret_lookup(email):
+    """Read the TimeTree password for `email` from the system keyring, or None."""
+    email = (email or "").strip()
+    if not email:
+        return None
+    try:
+        proc = subprocess.run(
+            [TIMETREE_SECRET_HELPER, "lookup", email],
+            capture_output=True, timeout=12,
+        )
+        if proc.returncode != 0:
+            return None
+        password = proc.stdout.decode("utf-8", "replace")
+        return password if password else None
+    except Exception:
+        return None
+
+
+def timetree_credentials(cal_info):
+    """Resolve (email, password) for a TimeTree calendar entry."""
+    email = str(cal_info.get("email") or "").strip()
+    if not email:
+        raise ValueError(f"Calendar '{cal_info.get('name')}' has no TimeTree email configured")
+    password = timetree_secret_lookup(email)
+    if not password:
+        raise ValueError(
+            f"No TimeTree password stored in the system keyring for {email} - remove and re-add the calendar"
+        )
+    return email, password
+
+
+def timetree_login(email, password):
+    """Authenticate with TimeTree and return (session_cookie, csrf_token)."""
+    uuid_val = secrets.token_hex(16)
+    body = json.dumps({"uid": email, "password": password, "uuid": uuid_val}).encode("utf-8")
+    req = urllib.request.Request(
+        TIMETREE_AUTH_URL, data=body, method="PUT",
+        headers={**TIMETREE_HEADERS, "User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            set_cookie = resp.headers.get("Set-Cookie", "") or ""
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ValueError("TimeTree authentication failed: invalid email or password")
+        raise ValueError(f"TimeTree authentication failed (HTTP {e.code})")
+
+    cookie_match = re.search(r"_session_id=([^;]+)", set_cookie)
+    if not cookie_match:
+        raise ValueError("TimeTree authentication failed: no session cookie returned")
+    session_cookie = cookie_match.group(1)
+
+    csrf_token = None
+    try:
+        home_req = urllib.request.Request(
+            TIMETREE_HOME_URL,
+            headers={"User-Agent": USER_AGENT, "Cookie": f"_session_id={session_cookie}"},
+        )
+        with urllib.request.urlopen(home_req, timeout=12) as resp:
+            html = safe_read_bytes(resp, max_bytes=MAX_ICAL_BYTES).decode("utf-8", "replace")
+        csrf_match = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', html, re.IGNORECASE)
+        if csrf_match:
+            csrf_token = csrf_match.group(1)
+    except Exception:
+        pass
+
+    return session_cookie, csrf_token
+
+
+def fetch_timetree_calendar(cal_info, window_start, window_end):
+    """Fetch events from a TimeTree calendar via its private web API."""
+    name = cal_info.get("name", "TimeTree")
+    color = cal_info.get("color", "#4a6cf7")
+    calendar_id = str(cal_info.get("calendarId") or "").strip()
+    if not calendar_id:
+        return {"name": name, "color": color, "events": [], "status": "no_calendar_id", "count": 0}
+
+    try:
+        email, password = timetree_credentials(cal_info)
+        session_cookie, _ = timetree_login(email, password)
+
+        url = f"{TIMETREE_BASE_URL}/calendar/{urllib.parse.quote(calendar_id, safe='')}/events/sync?since=0"
+        req = urllib.request.Request(url, headers={
+            **TIMETREE_HEADERS,
+            "User-Agent": USER_AGENT,
+            "Cookie": f"_session_id={session_cookie}",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+            data = json.loads(raw.decode("utf-8"))
+
+        auto_translate = cal_info.get("translateKorean", False)
+        events = []
+        for item in data.get("events", []):
+            if item.get("deleted_at"):
+                continue
+
+            start_ms = item.get("start_at")
+            if start_ms is None:
+                continue
+            end_ms = item.get("end_at")
+            all_day = bool(item.get("all_day"))
+            start_dt = datetime.fromtimestamp(start_ms / 1000)
+            end_dt = datetime.fromtimestamp(end_ms / 1000) if end_ms is not None else start_dt + timedelta(hours=1)
+
+            title = item.get("title") or "(Untitled Event)"
+            location = item.get("location") or ""
+            description = item.get("note") or ""
+
+            if auto_translate:
+                title = translate_korean_to_english(title)
+                location = translate_korean_to_english(location)
+
+            meeting_url, meeting_provider = extract_meeting_info(location, description, title)
+            if not meeting_url and item.get("url"):
+                u = validate_meeting_url(item.get("url"))
+                if u:
+                    meeting_url, meeting_provider = u, "Meeting"
+
+            evt = {
+                "id": item.get("uuid", f"tt_{int(start_dt.timestamp())}"),
+                "title": title,
+                "location": location,
+                "description": description,
+                "calendar": name,
+                "calendarId": calendar_id,
+                "calendarType": "timetree",
+                "writable": True,
+                "color": color,
+                "all_day": all_day,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "date_key": start_dt.strftime("%Y-%m-%d"),
+                "meetingUrl": meeting_url or "",
+                "meetingProvider": meeting_provider or "",
+                "rrule": None,
+                "exdates": [],
+            }
+
+            multidays = expand_multiday_event(evt, window_start, window_end)
+            events.extend(multidays)
+
+        return {
+            "name": name, "color": color, "type": "timetree", "writable": True,
+            "events": events, "status": "ok", "count": len(events),
+        }
+    except Exception as e:
+        return {
+            "name": name, "color": color, "type": "timetree", "writable": True,
+            "events": [], "status": f"error: {str(e)}", "count": 0,
+        }
+
+
+def create_timetree_event(cal_info, event_data):
+    """Create an event on TimeTree via its private web API. Requires a CSRF token."""
+    calendar_id = str(cal_info.get("calendarId") or "").strip()
+    if not calendar_id:
+        raise ValueError("TimeTree calendar has no calendar ID configured")
+
+    email, password = timetree_credentials(cal_info)
+    session_cookie, csrf_token = timetree_login(email, password)
+    if not csrf_token:
+        raise ValueError("Could not obtain a TimeTree CSRF token - try again")
+
+    title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
+    location = str(event_data.get("location", "")).strip()
+    description = str(event_data.get("description", "")).strip()
+    all_day = bool(event_data.get("allDay", False))
+
+    start_val = str(event_data.get("start", "")).strip()
+    end_val = str(event_data.get("end", "")).strip()
+    if not start_val:
+        raise ValueError("Event must have a start date/time")
+
+    tz_name = get_local_tz_name() or "UTC"
+    start_dt = parse_iso_or_local(start_val)
+    if end_val:
+        end_dt = parse_iso_or_local(end_val)
+    else:
+        end_dt = start_dt + (timedelta(days=1) if all_day else timedelta(hours=1))
+
+    body = {
+        "title": title,
+        "all_day": all_day,
+        "start_at": int(start_dt.timestamp() * 1000),
+        "start_timezone": tz_name,
+        "end_at": int(end_dt.timestamp() * 1000),
+        "end_timezone": tz_name,
+        "category": 1,
+    }
+    if description:
+        body["note"] = description
+    if location:
+        body["location"] = location
+    label_id = cal_info.get("labelId")
+    if label_id:
+        body["label_id"] = label_id
+
+    url = f"{TIMETREE_BASE_URL}/calendar/{urllib.parse.quote(calendar_id, safe='')}/event"
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={
+            **TIMETREE_HEADERS,
+            "User-Agent": USER_AGENT,
+            "Cookie": f"_session_id={session_cookie}",
+            "x-csrf-token": csrf_token,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+            created = json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            raise ValueError("TimeTree CSRF token missing or invalid - re-authentication required")
+        raise ValueError(f"Failed to create TimeTree event (HTTP {e.code})")
+
+    event_obj = created.get("event", created) if isinstance(created, dict) else created
+    return {"status": "success", "id": event_obj.get("uuid") if isinstance(event_obj, dict) else None, "event": event_obj}
+
+
+def delete_timetree_event(cal_info, event_id):
+    """Delete an event from TimeTree via its private web API."""
+    calendar_id = str(cal_info.get("calendarId") or "").strip()
+    if not calendar_id:
+        raise ValueError("TimeTree calendar has no calendar ID configured")
+
+    email, password = timetree_credentials(cal_info)
+    session_cookie, csrf_token = timetree_login(email, password)
+    if not csrf_token:
+        raise ValueError("Could not obtain a TimeTree CSRF token - try again")
+
+    url = (
+        f"{TIMETREE_BASE_URL}/calendar/{urllib.parse.quote(calendar_id, safe='')}"
+        f"/event/{urllib.parse.quote(str(event_id), safe='')}"
+    )
+    req = urllib.request.Request(
+        url, method="DELETE",
+        headers={
+            **TIMETREE_HEADERS,
+            "User-Agent": USER_AGENT,
+            "Cookie": f"_session_id={session_cookie}",
+            "x-csrf-token": csrf_token,
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return {"status": "success", "id": event_id}
+
+
 def calendar_kind(cal_info):
     """
     The one place that decides which backend serves a calendars.json entry:
@@ -1952,6 +2213,8 @@ def calendar_kind(cal_info):
     cal_type = str(cal_info.get("type", "")).lower()
     if cal_type == "local":
         return "local"
+    if cal_type == "timetree":
+        return "timetree"
     if cal_type == "jmap" or "jmapToken" in cal_info:
         return "jmap"
     if cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("url")):
@@ -1969,6 +2232,7 @@ def fetch_calendar_item(cal_info, window_start, window_end):
         "jmap": fetch_jmap_calendar,
         "google": fetch_google_api_calendar,
         "caldav": fetch_caldav_calendar,
+        "timetree": fetch_timetree_calendar,
     }.get(calendar_kind(cal_info), fetch_calendar)
     return fetcher(cal_info, window_start, window_end)
 
@@ -3063,6 +3327,7 @@ def create_event(event_data):
         "jmap": create_jmap_event,
         "caldav": create_caldav_event,
         "google": create_google_event,
+        "timetree": create_timetree_event,
     }.get(kind)
     if creator is None:
         raise ValueError(f"Calendar '{cal_info.get('name')}' is a read-only subscription feed and does not accept push events.")
@@ -3087,7 +3352,7 @@ def resolve_event_target(data, action):
 
     if str(event_id).startswith("loc_") or str(event_id).startswith("local_"):
         cal_type = "local"
-    if cal_type not in ("local", "jmap", "caldav", "google"):
+    if cal_type not in ("local", "jmap", "caldav", "google", "timetree"):
         raise ValueError(f"Calendar '{cal_target}' does not support event {action} (read-only feed).")
     return event_id, cal_info, cal_type
 
@@ -3100,6 +3365,7 @@ def delete_event(delete_data):
         "jmap": delete_jmap_event,
         "caldav": delete_caldav_event,
         "google": delete_google_event,
+        "timetree": delete_timetree_event,
     }[cal_type](cal_info, event_id)
     sync_all_events()
     return res
@@ -3109,6 +3375,8 @@ def update_event(event_data):
     """Dispatcher to edit an event on its own calendar (events never change calendar)."""
     event_id, cal_info, cal_type = resolve_event_target(event_data, "editing")
     validate_event_times(event_data)
+    if cal_type == "timetree":
+        raise ValueError("TimeTree calendars do not support editing events yet.")
     res = {
         "local": update_local_event,
         "jmap": update_jmap_event,
@@ -3143,6 +3411,14 @@ def get_writable_calendars():
                 "type": "local",
                 "color": c.get("color", "#a6e3a1"),
                 "calendarId": "local",
+                "writable": True,
+            })
+        elif c_type == "timetree":
+            writables.append({
+                "name": c.get("name", "TimeTree"),
+                "type": "timetree",
+                "color": c.get("color", "#4a6cf7"),
+                "calendarId": c.get("calendarId"),
                 "writable": True,
             })
         elif c_type == "jmap":

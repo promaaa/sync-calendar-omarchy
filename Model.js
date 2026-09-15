@@ -519,6 +519,14 @@ function getWritableCalendars(configuredList) {
         calendarId: "local",
         writable: true
       })
+    } else if (type === "timetree") {
+      writables.push({
+        name: c.name || "TimeTree",
+        type: "timetree",
+        color: c.color || "#4a6cf7",
+        calendarId: c.calendarId,
+        writable: true
+      })
     } else if (type === "jmap" || c.jmapToken) {
       writables.push({
         name: c.name || "JMAP",

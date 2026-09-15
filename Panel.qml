@@ -305,10 +305,13 @@ Panel {
 
   property bool addingCalendar: false
   property string formName: ""
-  property string formType: "url" // "url", "googleId", "jmap", "local"
+  property string formType: "url" // "url", "googleId", "jmap", "local", "timetree"
   property string formAddress: ""
   property string formJmapUrl: ""
   property string formJmapToken: ""
+  property string formTimetreeEmail: ""
+  property string formTimetreePassword: ""
+  property string formTimetreeCalendarId: ""
   property string formColor: "#4285f4"
   // The list waiting to be written. Edits made before the write ends start
   // from it, not from the file on disk, so they do not undo each other.
@@ -322,6 +325,11 @@ Panel {
     root.agendaMode = root.agendaMode === "upcoming" ? "day" : "upcoming"
     root.expandedEventKey = ""
   }
+  // Set while storeTimetreeSecretProc is writing the password to the keyring;
+  // the calendar entry itself is only appended to calendars.json once that
+  // succeeds, so a failed keyring write never leaves a passwordless entry behind.
+  property string pendingTimetreeItemJson: ""
+  property string timetreeSecretError: ""
 
   function openSettings(tab) {
     showingShortcutsHelp = false
@@ -383,13 +391,46 @@ Panel {
     formAddress = ""
     formJmapUrl = "https://api.fastmail.com/jmap/session"
     formJmapToken = ""
-    formColor = formType === "googleId" ? "#e01b24" : (formType === "jmap" ? "#ff7700" : (formType === "local" ? "#a6e3a1" : "#4285f4"))
+    formTimetreeEmail = ""
+    formTimetreePassword = ""
+    formTimetreeCalendarId = ""
+    timetreeSecretError = ""
+    formColor = formType === "googleId" ? "#e01b24" : (formType === "jmap" ? "#ff7700" : (formType === "local" ? "#a6e3a1" : (formType === "timetree" ? "#4a6cf7" : "#4285f4")))
     addingCalendar = true
     if (calendarScroll) calendarScroll.contentY = 0
   }
 
   function commitNewCalendar() {
     if (!formName.trim()) return
+
+    // TimeTree's password never lands in calendars.json: it goes to the
+    // system keyring first, and the calendar entry is only appended once
+    // that write is confirmed. See storeTimetreeSecretProc below.
+    if (formType === "timetree") {
+      if (!formTimetreeEmail.trim() || !formTimetreePassword || !formTimetreeCalendarId.trim()) return
+      timetreeSecretError = ""
+      var ttItem = {
+        name: formName.trim(),
+        color: formColor,
+        enabled: true,
+        type: "timetree",
+        email: formTimetreeEmail.trim(),
+        calendarId: formTimetreeCalendarId.trim()
+      }
+      pendingTimetreeItemJson = JSON.stringify(ttItem)
+      storeTimetreeSecretProc.pendingPassword = formTimetreePassword
+      storeTimetreeSecretProc.command = [
+        Qt.resolvedUrl("bin/omarchy-calendar-secret").toString().replace(/^file:\/\//, ""),
+        "store",
+        ttItem.email,
+        "TimeTree: " + ttItem.email
+      ]
+      storeTimetreeSecretProc.launched = false
+      storeTimetreeSecretProc.stdinEnabled = true
+      storeTimetreeSecretProc.running = true
+      return
+    }
+
     var list = root.calendarList()
     var item = {
       name: formName.trim(),
@@ -781,6 +822,82 @@ Panel {
 
   Process {
     id: copyProc
+  }
+
+  Process {
+  // Writes the TimeTree password to the system keyring (libsecret) before the
+  // calendar entry itself is ever saved to calendars.json, mirroring
+  // io.github.cahva.rdp-manager's own secret-store Process. The password
+  // travels only over this stdin pipe, never as an argv element, so it never
+  // shows up in `ps`. stdinEnabled must be flipped back to true before every
+  // run: onStarted's write() is a no-op once a previous run has closed stdin,
+  // which would otherwise leave later saves silently blocked on secret-tool
+  // until it times out.
+  Process {
+    id: storeTimetreeSecretProc
+    property string pendingPassword: ""
+    property bool launched: false
+    stdinEnabled: true
+    onRunningChanged: {
+      if (running || launched) return
+      pendingPassword = ""
+      root.pendingTimetreeItemJson = ""
+      root.timetreeSecretError = "Could not run the keyring helper — check bin/ is executable"
+    }
+    onStarted: {
+      launched = true
+      write(pendingPassword)
+      stdinEnabled = false
+      pendingPassword = ""
+    }
+    onExited: function(exitCode) {
+      pendingPassword = ""
+      if (exitCode === 0 && root.pendingTimetreeItemJson) {
+        var list = root.calendarList()
+        list.push(JSON.parse(root.pendingTimetreeItemJson))
+        root.pendingTimetreeItemJson = ""
+        root.formTimetreePassword = ""
+        root.saveCalendars(list)
+        root.addingCalendar = false
+      } else {
+        root.pendingTimetreeItemJson = ""
+        root.timetreeSecretError = exitCode === 124
+          ? "Timed out saving to the keyring — is it unlocked?"
+          : "Could not save the password to the keyring"
+      }
+    }
+  }
+
+  Process {
+    id: createEventProc
+    stdinEnabled: true
+    onStarted: {
+      write(root.pendingEventPayloadJson + "\n")
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.eventSubmitting = false
+        root.pendingEventPayloadJson = ""
+        root.addingEvent = false
+        eventsFile.reload()
+      }
+    }
+  }
+
+  Process {
+    id: deleteEventProc
+    stdinEnabled: true
+    onStarted: {
+      write(root.pendingDeletePayloadJson + "\n")
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.pendingDeletePayloadJson = ""
+        eventsFile.reload()
+      }
+    }
   }
 
   Process {
@@ -2914,6 +3031,35 @@ Panel {
                     }
                   }
                 }
+
+                Rectangle {
+                  width: typeTimetreeText.implicitWidth + Style.space(14)
+                  height: Style.space(24)
+                  radius: Style.cornerRadius
+                  color: root.formType === "timetree" ? Color.accent : "transparent"
+                  border.width: root.formType === "timetree" ? 0 : Style.spacing.hairline
+                  border.color: Qt.darker(root.contentForeground, 1.8)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: typeTimetreeText
+                    anchors.centerIn: parent
+                    text: "TimeTree"
+                    color: root.formType === "timetree" ? Color.background : root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: root.formType === "timetree"
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      root.formType = "timetree"
+                      root.formColor = "#4a6cf7"
+                    }
+                  }
+                }
               }
 
               // Name Field
@@ -2952,10 +3098,60 @@ Panel {
                 onTextChanged: root.formJmapToken = text
               }
 
-              // Address / ID Field (not needed for Local)
+              // TimeTree Email Field (TimeTree only)
+              TextField {
+                id: calTimetreeEmailInput
+                visible: root.formType === "timetree"
+                width: parent.width
+                placeholderText: "TimeTree Account Email"
+                text: root.formTimetreeEmail
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                onTextChanged: root.formTimetreeEmail = text
+              }
+
+              // TimeTree Password Field (TimeTree only) - stored in the system
+              // keyring on submit, never written to calendars.json.
+              TextField {
+                id: calTimetreePasswordInput
+                visible: root.formType === "timetree"
+                width: parent.width
+                password: true
+                placeholderText: "TimeTree Account Password"
+                text: root.formTimetreePassword
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                onTextChanged: root.formTimetreePassword = text
+              }
+
+              // TimeTree Calendar ID Field (TimeTree only)
+              TextField {
+                id: calTimetreeCalendarIdInput
+                visible: root.formType === "timetree"
+                width: parent.width
+                placeholderText: "TimeTree Calendar ID (numeric, from the calendar's TimeTree URL)"
+                text: root.formTimetreeCalendarId
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                onTextChanged: root.formTimetreeCalendarId = text
+              }
+
+              // TimeTree keyring error (TimeTree only)
+              Text {
+                textFormat: Text.PlainText
+                visible: root.formType === "timetree" && root.timetreeSecretError.length > 0
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.timetreeSecretError
+                color: Color.accent
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              // Address / ID Field (not needed for Local or TimeTree)
               TextField {
                 id: calAddressInput
-                visible: root.formType !== "local"
+                visible: root.formType !== "local" && root.formType !== "timetree"
                 width: parent.width
                 placeholderText: root.formType === "googleId"
                   ? "Google Calendar ID (e.g. xyz@group.calendar.google.com)"
@@ -3043,7 +3239,9 @@ Panel {
                     ? Boolean(root.formName.trim())
                     : (root.formType === "jmap"
                        ? Boolean(root.formName.trim() && root.formJmapToken.trim())
-                       : Boolean(root.formName.trim() && root.formAddress.trim()))
+                       : (root.formType === "timetree"
+                          ? Boolean(root.formName.trim() && root.formTimetreeEmail.trim() && root.formTimetreePassword && root.formTimetreeCalendarId.trim())
+                          : Boolean(root.formName.trim() && root.formAddress.trim())))
                   width: addBtnText.implicitWidth + Style.space(16)
                   height: Style.space(26)
                   radius: Style.cornerRadius
@@ -3179,7 +3377,7 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: (modelData.type === "jmap" || modelData.jmapToken) ? "JMAP" : (modelData.googleCalendarId ? "GOOGLE API" : "ICAL FEED")
+                        text: modelData.type === "timetree" ? "TIMETREE" : ((modelData.type === "jmap" || modelData.jmapToken) ? "JMAP" : (modelData.googleCalendarId ? "GOOGLE API" : "ICAL FEED"))
                         color: Qt.darker(root.contentForeground, 1.9)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption

@@ -39,16 +39,23 @@ Follows your Omarchy theme (the shots below are three different ones). Works wit
 - **Fast & Non-Blocking**: Background multi-threaded event fetcher with zero UI freezes.
 - **Recurring & Multi-Day Events**: Full support for daily, weekly, monthly, and yearly recurring events (`RRULE` / `EXDATE`) and multi-day spans.
 
-### Keyboard Shortcuts
+### Keyboard Shortcuts & Vim Navigation
 
 | Key | Action |
 | --- | --- |
-| `n` / `N` | **New Event**: Open event creation modal for the selected date |
-| `y` / `Y` | **Copy Agenda**: Export day's events to clipboard as Markdown tasks |
-| `t` / `T` | **Today**: Jump to current date |
-| `[` / `]` | **Month**: Previous / Next month |
+| `h` / `l` or `←` / `→` | **Day Navigation**: Move selection 1 day backward / forward |
+| `k` / `j` or `↑` / `↓` | **Week Navigation**: Move selection 1 week backward / forward |
+| `0` / `^` | **Week Start**: Jump to first day of current week |
+| `$` | **Week End**: Jump to last day of current week |
+| `H` / `L` | **Month Bounds**: Jump to 1st day / last day of current month |
+| `[` / `]` or `PgUp` / `PgDn` | **Month**: Previous / Next month |
 | `{` / `}` | **Year**: Previous / Next year |
+| `t` / `T` | **Today**: Jump to current date |
+| `n` / `N` or `Enter` | **New Event**: Open event creation modal for the selected date |
+| `y` / `Y` | **Copy Agenda**: Export day's events to clipboard as Markdown tasks |
+| `r` / `R` | **Refresh & Sync**: Instant background calendar synchronization |
 | `w` / `W` | **Week Start**: Toggle Monday / Sunday week start |
+| `?` | **Shortcuts Help**: Toggle keyboard shortcuts cheatsheet modal |
 | `Esc` | **Close**: Dismiss Add Event modal, Settings drawer, or Calendar popup |
 
 ## Installation

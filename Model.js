@@ -316,6 +316,65 @@ function stepMonth(year, month, delta) {
   return { year: target.getFullYear(), month: target.getMonth() }
 }
 
+// Pure date navigation math for grid & Vim keyboard navigation.
+function stepDate(dateKeyStr, deltaDays) {
+  var parts = String(dateKeyStr || "").split("-")
+  var y, m, d
+  if (parts.length === 3) {
+    y = parseInt(parts[0], 10)
+    m = parseInt(parts[1], 10) - 1
+    d = parseInt(parts[2], 10)
+  }
+  if (!isFinite(y) || !isFinite(m) || !isFinite(d)) {
+    var now = new Date()
+    y = now.getFullYear()
+    m = now.getMonth()
+    d = now.getDate()
+  }
+  var dt = new Date(Date.UTC(y, m, d + Number(deltaDays || 0)))
+  var resYear = dt.getUTCFullYear()
+  var resMonth = dt.getUTCMonth()
+  var resDay = dt.getUTCDate()
+  return {
+    dateKey: dateKey(resYear, resMonth, resDay),
+    year: resYear,
+    month: resMonth,
+    day: resDay
+  }
+}
+
+function stepToMonthBound(dateKeyStr, bound) {
+  var parts = String(dateKeyStr || "").split("-")
+  if (parts.length !== 3) return stepDate(dateKeyStr, 0)
+  var y = parseInt(parts[0], 10)
+  var m = parseInt(parts[1], 10) - 1
+  if (!isFinite(y) || !isFinite(m)) return stepDate(dateKeyStr, 0)
+  var isStart = bound === "start" || bound === "first" || bound === "top"
+  var targetDay = isStart ? 1 : new Date(Date.UTC(y, m + 1, 0)).getUTCDate()
+  return {
+    dateKey: dateKey(y, m, targetDay),
+    year: y,
+    month: m,
+    day: targetDay
+  }
+}
+
+function stepToWeekBound(dateKeyStr, bound, weekStart) {
+  var parts = String(dateKeyStr || "").split("-")
+  if (parts.length !== 3) return stepDate(dateKeyStr, 0)
+  var y = parseInt(parts[0], 10)
+  var m = parseInt(parts[1], 10) - 1
+  var d = parseInt(parts[2], 10)
+  if (!isFinite(y) || !isFinite(m) || !isFinite(d)) return stepDate(dateKeyStr, 0)
+  var dt = new Date(Date.UTC(y, m, d))
+  var dayOfWeek = dt.getUTCDay()
+  var start = normalizedWeekStart(weekStart, 1)
+  var offsetFromStart = (dayOfWeek - start + 7) % 7
+  var isStart = bound === "start" || bound === "first" || bound === "top"
+  var delta = isStart ? -offsetFromStart : (6 - offsetFromStart)
+  return stepDate(dateKeyStr, delta)
+}
+
 function parseEventsFile(text) {
   if (!text || typeof text !== "string") {
     return { eventsByDate: {}, calendars: [], lastSyncedFormatted: "", totalEvents: 0, configuredCount: 0 }
@@ -546,6 +605,9 @@ if (typeof module !== "undefined") {
     parseCalendarsConfig: parseCalendarsConfig,
     formatAgendaMarkdown: formatAgendaMarkdown,
     getWritableCalendars: getWritableCalendars,
-    calculateEndTime: calculateEndTime
+    calculateEndTime: calculateEndTime,
+    stepDate: stepDate,
+    stepToMonthBound: stepToMonthBound,
+    stepToWeekBound: stepToWeekBound
   }
 }

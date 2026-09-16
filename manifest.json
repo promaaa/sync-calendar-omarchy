@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "promaa.clock",
   "name": "Chronica",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "author": "promaaa",
   "license": "MIT",
   "description": "Date/time label with an interactive calendar popup, two-way event sync & push over Google, JMAP and CalDAV, and universal iCalendar (.ics / webcal) sync",

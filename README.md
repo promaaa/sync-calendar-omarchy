@@ -147,6 +147,14 @@ Configure your calendar feeds and preferences using the in-app **Settings Menu (
     "url": "https://nextcloud.example.com/remote.php/dav/public-calendars/xxxxxxxx?export",
     "color": "#0082c9",
     "enabled": true
+  },
+  {
+    "name": "Radicale / Private CalDAV",
+    "url": "https://example.com/username/calendar-id",
+    "username": "your_username",
+    "password": "your_password",
+    "color": "#ff5555",
+    "enabled": true
   }
 ]
 ```

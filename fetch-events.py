@@ -93,7 +93,7 @@ def safe_load_json(file_path, max_bytes=MAX_CONFIG_BYTES):
     Read JSON from one descriptor, rejecting links, non-files, foreign owners,
     and files larger than the configured limit.
     """
-    dir_name = os.path.dirname(os.path.abspath(file_path))
+    dir_name = os.path.dirname(os.path.realpath(file_path))
     file_name = os.path.basename(file_path)
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -132,9 +132,8 @@ def write_secure_json(path, data, mode=0o600, max_bytes=MAX_CONFIG_BYTES):
     payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     if len(payload) > max_bytes:
         raise ValueError(f"JSON output exceeds safety limit of {max_bytes} bytes")
-    abs_path = os.path.abspath(path)
-    dir_name = os.path.dirname(abs_path)
-    file_name = os.path.basename(abs_path)
+    dir_name = os.path.dirname(os.path.realpath(path))
+    file_name = os.path.basename(path)
     os.makedirs(dir_name, mode=0o700, exist_ok=True)
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     dir_fd = os.open(dir_name, dir_flags)
@@ -1333,6 +1332,9 @@ def fetch_calendar(cal_info, window_start, window_end):
     if not raw_url:
         return {"name": name, "color": cal_info.get("color", "#4A90E2"), "events": [], "status": "no_url", "count": 0}
 
+    username = cal_info.get("username")
+    password = cal_info.get("password")
+
     # Convert webcal:// or webcals:// to https://
     if raw_url.startswith("webcal://"):
         url = "https://" + raw_url[9:]
@@ -1347,13 +1349,39 @@ def fetch_calendar(cal_info, window_start, window_end):
         else:
             url = "https://" + raw_url
 
+    headers = {"User-Agent": USER_AGENT}
+
     try:
         if url.startswith("file://") or url.startswith("/"):
             path = url[7:] if url.startswith("file://") else url
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 content = safe_read_text(f, max_bytes=MAX_ICAL_BYTES)
         else:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            # Extract credentials embedded in URL if not already provided
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.username and not username:
+                username = urllib.parse.unquote(parsed.username)
+            if parsed.password and password is None:
+                password = urllib.parse.unquote(parsed.password)
+
+            if parsed.username or parsed.password:
+                if parsed.hostname:
+                    host = f"[{parsed.hostname}]" if ":" in parsed.hostname and not parsed.hostname.startswith("[") else parsed.hostname
+                    netloc = f"{host}:{parsed.port}" if parsed.port else host
+                else:
+                    netloc = parsed.netloc
+                url = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+            if username and password is not None:
+                user_str = str(username).strip()
+                pass_str = str(password)
+                if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in user_str + pass_str):
+                    raise ValueError("Calendar username or password contains invalid characters")
+                auth_str = f"{user_str}:{pass_str}"
+                auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("ascii")
+                headers["Authorization"] = f"Basic {auth_b64}"
+
+            req = urllib.request.Request(url, headers=headers)
             resp_content = None
             last_error = None
             # Retry transient connection resets / throttling (common on Apple iCloud CalDAV)

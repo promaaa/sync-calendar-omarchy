@@ -71,6 +71,7 @@ Panel {
   property bool agendaCopied: false
 
   // ---- Event Creation & Management State
+  property bool showingShortcutsHelp: false
   property bool addingEvent: false
   property string eventTitle: ""
   property string eventCalendar: ""
@@ -86,7 +87,21 @@ Panel {
   property string pendingDeletePayloadJson: ""
   readonly property var writableCalendars: Model.getWritableCalendars(root.configuredCalendars)
 
+  function toggleShortcutsHelp() {
+    root.showingShortcutsHelp = !root.showingShortcutsHelp
+    if (root.showingShortcutsHelp) {
+      root.showingSettings = false
+      root.addingCalendar = false
+      root.addingEvent = false
+    }
+  }
+
+  function closeShortcutsHelp() {
+    root.showingShortcutsHelp = false
+  }
+
   function openAddEvent(dateKey) {
+    root.showingShortcutsHelp = false
     root.showingSettings = false
     root.addingCalendar = false
     root.eventTitle = ""
@@ -184,6 +199,7 @@ Panel {
   property string pendingConfigJson: ""
 
   function openSettings(tab) {
+    showingShortcutsHelp = false
     showingSettings = true
     addingCalendar = false
     addingEvent = false
@@ -344,6 +360,7 @@ Panel {
     // Dismissing the panel mid-edit would otherwise leave the inputs up,
     // waiting behind a closed popup for the next time it opens.
     if (root.editingLife) root.cancelEditingLife()
+    root.closeShortcutsHelp()
     root.closeAddEvent()
     root.closeSettings()
     root.controller.hide()
@@ -463,6 +480,36 @@ Panel {
     if (!inMonth && year !== undefined && month !== undefined) {
       root.viewYear = year
       root.viewMonth = month
+    }
+  }
+
+  function moveSelectedDay(deltaDays) {
+    var currentKey = root.selectedDateKey || root.todayKey
+    var target = Model.stepDate(currentKey, deltaDays)
+    root.selectedDateKey = target.dateKey
+    if (target.year !== root.viewYear || target.month !== root.viewMonth) {
+      root.viewYear = target.year
+      root.viewMonth = target.month
+    }
+  }
+
+  function jumpToWeekBound(bound) {
+    var currentKey = root.selectedDateKey || root.todayKey
+    var target = Model.stepToWeekBound(currentKey, bound, root.weekStart)
+    root.selectedDateKey = target.dateKey
+    if (target.year !== root.viewYear || target.month !== root.viewMonth) {
+      root.viewYear = target.year
+      root.viewMonth = target.month
+    }
+  }
+
+  function jumpToMonthBound(bound) {
+    var currentKey = root.selectedDateKey || root.todayKey
+    var target = Model.stepToMonthBound(currentKey, bound)
+    root.selectedDateKey = target.dateKey
+    if (target.year !== root.viewYear || target.month !== root.viewMonth) {
+      root.viewYear = target.year
+      root.viewMonth = target.month
     }
   }
 
@@ -745,19 +792,32 @@ Panel {
                                             (eventDescInput && eventDescInput.activeFocus)
       blocked: root.editingLife || hasActiveInput
       onMoveRequested: function(dx, dy) {
-        if (dx !== 0) root.moveMonth(dx)
-        if (dy !== 0) root.moveYear(dy)
+        if (dx !== 0) root.moveSelectedDay(dx)
+        if (dy !== 0) root.moveSelectedDay(dy * 7)
       }
-      onActivateRequested: root.goToToday()
+      onActivateRequested: {
+        if (!root.addingEvent && !root.showingSettings && !root.showingShortcutsHelp) {
+          root.openAddEvent(root.selectedDateKey)
+        }
+      }
       onCloseRequested: {
-        if (root.addingCalendar) root.addingCalendar = false
+        if (root.showingShortcutsHelp) root.closeShortcutsHelp()
+        else if (root.addingCalendar) root.addingCalendar = false
         else if (root.addingEvent) root.closeAddEvent()
         else if (root.showingSettings) root.closeSettings()
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "[") root.moveMonth(-1)
+        if (t === "h") root.moveSelectedDay(-1)
+        else if (t === "l") root.moveSelectedDay(1)
+        else if (t === "k") root.moveSelectedDay(-7)
+        else if (t === "j") root.moveSelectedDay(7)
+        else if (t === "0" || t === "^") root.jumpToWeekBound("start")
+        else if (t === "$") root.jumpToWeekBound("end")
+        else if (t === "H") root.jumpToMonthBound("start")
+        else if (t === "L") root.jumpToMonthBound("end")
+        else if (t === "[") root.moveMonth(-1)
         else if (t === "]") root.moveMonth(1)
         else if (t === "{") root.moveYear(-1)
         else if (t === "}") root.moveYear(1)
@@ -765,6 +825,25 @@ Panel {
         else if (t === "w" || t === "W") root.toggleWeekStart()
         else if (t === "y" || t === "Y") root.copyAgendaMarkdown()
         else if (t === "n" || t === "N") root.openAddEvent(root.selectedDateKey)
+        else if (t === "r" || t === "R") root.syncCalendars(true)
+        else if (t === "?") root.toggleShortcutsHelp()
+      }
+
+      Keys.onPressed: function(event) {
+        if (hasActiveInput || root.editingLife) return
+        if (event.key === Qt.Key_PageUp) {
+          root.moveMonth(-1)
+          event.accepted = true
+        } else if (event.key === Qt.Key_PageDown) {
+          root.moveMonth(1)
+          event.accepted = true
+        } else if (event.key === Qt.Key_Home) {
+          root.jumpToMonthBound("start")
+          event.accepted = true
+        } else if (event.key === Qt.Key_End) {
+          root.jumpToMonthBound("end")
+          event.accepted = true
+        }
       }
 
 
@@ -1180,13 +1259,13 @@ Panel {
                       radius: Style.cornerRadius
                       color: isSelected
                         ? (modelData.today
-                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
                             : Style.hoverFillFor(root.contentForeground, Color.accent))
-                        : (cellMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : "transparent")
-                      border.width: modelData.today ? Style.spacing.hairline : (isSelected ? Style.spacing.hairline : 0)
-                      border.color: modelData.today
-                        ? Style.normalBorderFor(root.contentForeground, Color.accent)
-                        : (isSelected ? Style.selectedStateColor(root.contentForeground, Color.accent) : "transparent")
+                        : (cellMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : (modelData.today ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10) : "transparent"))
+                      border.width: isSelected ? 1.5 : (modelData.today ? Style.spacing.hairline : 0)
+                      border.color: isSelected
+                        ? Style.selectedStateColor(root.contentForeground, Color.accent)
+                        : (modelData.today ? Style.normalBorderFor(root.contentForeground, Color.accent) : "transparent")
 
                       Text {
                         textFormat: Text.PlainText
@@ -1443,6 +1522,16 @@ Panel {
                 }
 
                 PanelActionButton {
+                  id: shortcutsHelpBtn
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "󰌌"
+                  tooltipText: root.showingShortcutsHelp ? "Hide Shortcuts (?)" : "Keyboard Shortcuts (?)"
+                  foreground: root.showingShortcutsHelp ? Color.accent : root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  onClicked: root.toggleShortcutsHelp()
+                }
+
+                PanelActionButton {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: "󰒓"
                   tooltipText: "Calendar Settings"
@@ -1457,7 +1546,7 @@ Panel {
             // ---- Google login warning: stays until the account is reconnected ----
             Rectangle {
               id: googleAuthBanner
-              visible: root.googleAuthIssue !== null && !root.addingEvent
+              visible: root.googleAuthIssue !== null && !root.addingEvent && !root.showingShortcutsHelp
               width: parent.width
               height: visible ? (googleAuthBannerText.implicitHeight + Style.space(20)) : 0
               radius: Style.cornerRadius
@@ -1512,6 +1601,182 @@ Panel {
                 fontFamily: root.contentFontFamily
               }
             }
+
+            // ---- Keyboard Shortcuts Cheat Sheet Card ----
+            Rectangle {
+              id: shortcutsHelpCard
+              visible: root.showingShortcutsHelp && !root.showingSettings && !root.addingEvent
+              width: parent.width
+              height: visible ? (shortcutsCol.implicitHeight + Style.space(20)) : 0
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.contentForeground, Color.accent)
+              border.width: 1
+              border.color: Color.accent
+
+              Column {
+                id: shortcutsCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                spacing: Style.space(8)
+
+                Row {
+                  width: parent.width
+                  Item {
+                    width: parent.width - Style.space(24)
+                    height: Style.space(20)
+                    Row {
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(6)
+                      Text {
+                        textFormat: Text.PlainText
+                        text: "󰌌"
+                        color: Color.accent
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.icon
+                      }
+                      Text {
+                        textFormat: Text.PlainText
+                        text: "KEYBOARD SHORTCUTS"
+                        color: root.contentForeground
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
+                    }
+                  }
+                  PanelActionButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "󰅖"
+                    tooltipText: "Close (Esc or ?)"
+                    foreground: root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    onClicked: root.closeShortcutsHelp()
+                  }
+                }
+
+                Grid {
+                  columns: 2
+                  rowSpacing: Style.space(6)
+                  columnSpacing: Style.space(16)
+                  width: parent.width
+
+                  // Left Column: Navigation
+                  Column {
+                    spacing: Style.space(4)
+                    width: (shortcutsCol.width - Style.space(16)) / 2
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "NAVIGATION"
+                      color: Qt.darker(root.contentForeground, 1.7)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: 10
+                      font.bold: true
+                    }
+
+                    Repeater {
+                      model: [
+                        { key: "h / l · ← / →", desc: "Day prev / next" },
+                        { key: "k / j · ↑ / ↓", desc: "Week prev / next" },
+                        { key: "0 / $", desc: "Start / end of week" },
+                        { key: "H / L", desc: "1st / last day of month" },
+                        { key: "[ / ] · PgUp/Dn", desc: "Prev / next month" },
+                        { key: "{ / }", desc: "Prev / next year" },
+                        { key: "t", desc: "Jump to today" }
+                      ]
+                      Row {
+                        spacing: Style.space(6)
+                        Rectangle {
+                          width: keyBadgeText.implicitWidth + Style.space(8)
+                          height: Style.space(18)
+                          radius: Style.cornerRadius > 0 ? 3 : 0
+                          color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+                          border.width: Style.spacing.hairline
+                          border.color: Qt.darker(root.contentForeground, 2.0)
+                          Text {
+                            id: keyBadgeText
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: modelData.key
+                            color: Color.accent
+                            font.family: root.contentFontFamily
+                            font.pixelSize: 10
+                            font.bold: true
+                          }
+                        }
+                        Text {
+                          textFormat: Text.PlainText
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: modelData.desc
+                          color: Qt.darker(root.contentForeground, 1.3)
+                          font.family: root.contentFontFamily
+                          font.pixelSize: 11
+                        }
+                      }
+                    }
+                  }
+
+                  // Right Column: Actions
+                  Column {
+                    spacing: Style.space(4)
+                    width: (shortcutsCol.width - Style.space(16)) / 2
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "ACTIONS"
+                      color: Qt.darker(root.contentForeground, 1.7)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: 10
+                      font.bold: true
+                    }
+
+                    Repeater {
+                      model: [
+                        { key: "n · Enter", desc: "New event on date" },
+                        { key: "y", desc: "Copy agenda (Markdown)" },
+                        { key: "r", desc: "Sync / refresh calendars" },
+                        { key: "w", desc: "Toggle Mon / Sun start" },
+                        { key: "?", desc: "Toggle this help" },
+                        { key: "Esc", desc: "Close modal / panel" }
+                      ]
+                      Row {
+                        spacing: Style.space(6)
+                        Rectangle {
+                          width: actBadgeText.implicitWidth + Style.space(8)
+                          height: Style.space(18)
+                          radius: Style.cornerRadius > 0 ? 3 : 0
+                          color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+                          border.width: Style.spacing.hairline
+                          border.color: Qt.darker(root.contentForeground, 2.0)
+                          Text {
+                            id: actBadgeText
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: modelData.key
+                            color: Color.accent
+                            font.family: root.contentFontFamily
+                            font.pixelSize: 10
+                            font.bold: true
+                          }
+                        }
+                        Text {
+                          textFormat: Text.PlainText
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: modelData.desc
+                          color: Qt.darker(root.contentForeground, 1.3)
+                          font.family: root.contentFontFamily
+                          font.pixelSize: 11
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+>>>>>>> 182498e (v1.3.2: Add full grid & Vim keyboard navigation, shortcuts cheatsheet, and Google auth recovery)
             // ---- Add Event Modal / Form Card ----
             Rectangle {
               visible: root.addingEvent

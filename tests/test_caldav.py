@@ -124,7 +124,7 @@ class VeventBuildTests(unittest.TestCase):
             },
             "uid-4",
         )
-        self.assertIn("SUMMARY:Lunch\; with\\, a\\nfriend", ics)
+        self.assertIn(r"SUMMARY:Lunch\; with\, a\nfriend", ics)
         self.assertIn("DESCRIPTION:back\\\\slash", ics)
         for line in ics.split("\r\n"):
             self.assertNotIn("\n", line)
@@ -272,6 +272,83 @@ class WritableCalendarListTests(unittest.TestCase):
         self.assertEqual(by_name["Apple iCloud"]["type"], "caldav")
         self.assertNotIn("Read only", by_name)
         self.assertIn("Local Calendar", by_name)
+
+
+class FetchCalendarBasicAuthTests(unittest.TestCase):
+    SAMPLE_ICS = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nSUMMARY:Test\r\nDTSTART:20260901T090000Z\r\nDTEND:20260901T100000Z\r\nUID:test-1\r\nEND:VEVENT\r\nEND:VCALENDAR"
+
+    def test_fetch_calendar_with_explicit_credentials_sends_basic_auth(self):
+        cal = {
+            "name": "Radicale",
+            "url": "https://example.com/cal.ics",
+            "username": "myuser",
+            "password": "mypassword",
+        }
+        captured = []
+
+        def fake_urlopen(req, timeout=12):
+            captured.append(req)
+            return FakeResponse(self.SAMPLE_ICS)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = fetch_events.fetch_calendar(cal, fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 2))
+
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(len(captured), 1)
+        req = captured[0]
+        self.assertEqual(req.full_url, "https://example.com/cal.ics")
+        expected_auth = "Basic " + base64.b64encode(b"myuser:mypassword").decode("ascii")
+        self.assertEqual(req.get_header("Authorization"), expected_auth)
+
+    def test_fetch_calendar_with_embedded_webcal_credentials_strips_url_and_sends_basic_auth(self):
+        cal = {
+            "name": "Radicale Webcal",
+            "url": "webcal://alice:secret%24@cal.example.org:8443/export/cal.ics",
+        }
+        captured = []
+
+        def fake_urlopen(req, timeout=12):
+            captured.append(req)
+            return FakeResponse(self.SAMPLE_ICS)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = fetch_events.fetch_calendar(cal, fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 2))
+
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(len(captured), 1)
+        req = captured[0]
+        self.assertEqual(req.full_url, "https://cal.example.org:8443/export/cal.ics")
+        expected_auth = "Basic " + base64.b64encode("alice:secret$".encode("utf-8")).decode("ascii")
+        self.assertEqual(req.get_header("Authorization"), expected_auth)
+
+    def test_fetch_calendar_rejects_credentials_with_control_characters(self):
+        cal = {
+            "name": "Bad Auth",
+            "url": "https://example.com/cal.ics",
+            "username": "user\r\nInjected: evil",
+            "password": "pass",
+        }
+        res = fetch_events.fetch_calendar(cal, fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 2))
+        self.assertTrue(res["status"].startswith("error:"), res["status"])
+        self.assertIn("invalid characters", res["status"])
+
+    def test_fetch_calendar_public_feed_does_not_send_auth_header(self):
+        cal = {
+            "name": "Public",
+            "url": "https://example.com/public.ics",
+        }
+        captured = []
+
+        def fake_urlopen(req, timeout=12):
+            captured.append(req)
+            return FakeResponse(self.SAMPLE_ICS)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = fetch_events.fetch_calendar(cal, fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 2))
+
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(len(captured), 1)
+        self.assertIsNone(captured[0].get_header("Authorization"))
 
 
 if __name__ == "__main__":

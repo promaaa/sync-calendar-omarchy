@@ -78,6 +78,18 @@ class SecureJsonMixin:
             with open(collision, "r", encoding="utf-8") as stream:
                 self.assertEqual(stream.read(), "sentinel")
 
+    def test_secure_json_supports_symlinked_parent_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real_dir = os.path.join(directory, "real_config")
+            os.makedirs(real_dir)
+            link_dir = os.path.join(directory, "link_config")
+            os.symlink(real_dir, link_dir)
+            cfg_path = os.path.join(link_dir, "calendars.json")
+            self.module.write_secure_json(cfg_path, {"test": "symlink_ok"})
+            self.assertEqual(self.module.safe_load_json(cfg_path), {"test": "symlink_ok"})
+            real_file = os.path.join(real_dir, "calendars.json")
+            self.assertTrue(os.path.exists(real_file))
+
 
 class FetchEventsSecureJsonTests(SecureJsonMixin, unittest.TestCase):
     module = fetch_events

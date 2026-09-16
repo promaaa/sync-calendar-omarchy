@@ -93,7 +93,7 @@ def safe_load_json(file_path, max_bytes=MAX_CONFIG_BYTES):
     Read JSON from one descriptor, rejecting links, non-files, foreign owners,
     and files larger than the configured limit.
     """
-    dir_name = os.path.dirname(os.path.abspath(file_path))
+    dir_name = os.path.dirname(os.path.realpath(file_path))
     file_name = os.path.basename(file_path)
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -132,7 +132,7 @@ def write_secure_json(path, data, mode=0o600, max_bytes=MAX_CONFIG_BYTES):
     payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     if len(payload) > max_bytes:
         raise ValueError(f"JSON output exceeds safety limit of {max_bytes} bytes")
-    abs_path = os.path.abspath(path)
+    abs_path = os.path.realpath(path)
     dir_name = os.path.dirname(abs_path)
     file_name = os.path.basename(abs_path)
     os.makedirs(dir_name, mode=0o700, exist_ok=True)

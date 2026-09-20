@@ -1822,7 +1822,6 @@ Panel {
                     }
                   }
                   PanelActionButton {
-                    anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: "󰅖"
                     tooltipText: "Close form (Esc)"

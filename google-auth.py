@@ -20,7 +20,7 @@ STATE_DIR = os.path.expanduser("~/.local/state/omarchy")
 AUTH_FILE = os.path.join(STATE_DIR, "google-auth.json")
 PORT = 8088
 REDIRECT_URI = f"http://127.0.0.1:{PORT}"
-SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+SCOPE = "https://www.googleapis.com/auth/calendar.events"
 
 MAX_API_BYTES = 5 * 1024 * 1024     # 5 MB limit for API JSON responses
 MAX_CONFIG_BYTES = 1 * 1024 * 1024  # 1 MB limit for config/auth files

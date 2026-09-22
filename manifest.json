@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "promaa.clock",
   "name": "Chronica",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "author": "promaaa",
   "license": "MIT",
-  "description": "Date/time label with an interactive calendar popup, two-way event sync & push over Google, JMAP and CalDAV, and universal iCalendar (.ics / webcal) sync",
+  "description": "Every calendar you own, in your Omarchy bar: two-way sync with Google, CalDAV, Fastmail JMAP and any .ics or webcal feed",
   "kinds": [
     "bar-widget"
   ],
@@ -17,8 +17,7 @@
   },
   "barWidget": {
     "displayName": "Chronica",
-    "description": "Date/time status bar widget with synced Google, Apple iCloud, Proton, Outlook, Nextcloud, Fastmail (JMAP / iCal), and generic iCalendar agenda, writing back to Google, JMAP and CalDAV",
-
+    "description": "Clock that opens your calendar: month grid, agenda, and event creation",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "center",

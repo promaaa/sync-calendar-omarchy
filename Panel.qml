@@ -1776,7 +1776,6 @@ Panel {
               }
             }
 
->>>>>>> 182498e (v1.3.2: Add full grid & Vim keyboard navigation, shortcuts cheatsheet, and Google auth recovery)
             // ---- Add Event Modal / Form Card ----
             Rectangle {
               visible: root.addingEvent
@@ -1823,7 +1822,6 @@ Panel {
                     }
                   }
                   PanelActionButton {
-                    anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: "󰅖"
                     tooltipText: "Close form (Esc)"

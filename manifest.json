@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "promaa.clock",
   "name": "Chronica",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "author": "promaaa",
   "license": "MIT",
   "description": "Every calendar you own, in your Omarchy bar: two-way sync with Google, CalDAV, Fastmail JMAP and any .ics or webcal feed",

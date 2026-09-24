@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import unittest
 
 
@@ -9,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # (`white-space: nowrap`), and Omarchy's own widget picker elides it the same
 # way. Roughly 50 characters survive, so the lead clause has to stand alone.
 LISTING_LINE_BUDGET = 50
+
+SHIPPED_SUFFIXES = {".qml", ".js", ".py", ".json", ".md"}
+CONFLICT_MARKER = re.compile(r"^(<{7}|={7}|>{7})(?: |$)", re.MULTILINE)
 
 
 class PluginManifestContractTests(unittest.TestCase):
@@ -39,6 +43,20 @@ class PluginManifestContractTests(unittest.TestCase):
                 f"{field} has no clause break in its first {LISTING_LINE_BUDGET} "
                 f"characters, so the card shows a fragment: {head!r}",
             )
+
+
+class ShippedSourceContractTests(unittest.TestCase):
+    def test_no_leftover_merge_conflict_markers(self):
+        # One stray marker in Panel.qml shipped in v1.4.1 and v1.4.2: QML refused
+        # the whole file, so the popup never opened while the bar still looked fine.
+        for path in sorted(ROOT.rglob("*")):
+            if path.suffix not in SHIPPED_SUFFIXES or ".git" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            match = CONFLICT_MARKER.search(text)
+            if match:
+                line = text.count("\n", 0, match.start()) + 1
+                self.fail(f"{path.relative_to(ROOT)}:{line} has a merge conflict marker")
 
 
 if __name__ == "__main__":

@@ -904,6 +904,9 @@ def parse_ics(content, cal_info, window_start, window_end):
     """
     lines = unfold_lines(content)
     raw_events = []
+    # UID -> date keys of master occurrences replaced by an override VEVENT
+    # (same UID plus RECURRENCE-ID). Date-keyed like EXDATE.
+    overridden = {}
     in_vevent = False
     current = {}
 
@@ -914,6 +917,10 @@ def parse_ics(content, cal_info, window_start, window_end):
             continue
         elif line == "END:VEVENT":
             if in_vevent and "DTSTART" in current:
+                # Record overrides before the cancelled check: a cancelled
+                # override still removes the occurrence it names.
+                if "RECURRENCE-ID" in current and "UID" in current:
+                    overridden.setdefault(current["UID"], set()).add(current["RECURRENCE-ID"])
                 # Skip cancelled events
                 if current.get("STATUS", "").upper() != "CANCELLED":
                     raw_events.append(current)
@@ -958,6 +965,9 @@ def parse_ics(content, cal_info, window_start, window_end):
             current["URL"] = val_part.strip()
         elif prop_name == "RRULE":
             current["RRULE"] = parse_rrule(val_part)
+        elif prop_name == "RECURRENCE-ID":
+            _, rid_dt = parse_datetime_value(val_part.strip(), prop_params)
+            current["RECURRENCE-ID"] = rid_dt.strftime("%Y-%m-%d")
         elif prop_name == "EXDATE":
             for ex_val in val_part.split(","):
                 ex_val = ex_val.strip()
@@ -1016,6 +1026,9 @@ def parse_ics(content, cal_info, window_start, window_end):
             "rrule": raw.get("RRULE"),
             "exdates": raw.get("exdates", []),
         }
+
+        if evt["rrule"] and "RECURRENCE-ID" not in raw:
+            evt["exdates"] = evt["exdates"] + sorted(overridden.get(raw.get("UID"), ()))
 
         if evt["rrule"]:
             expanded = expand_recurring_event(evt, window_start, window_end)

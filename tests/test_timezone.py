@@ -248,6 +248,76 @@ END:VCALENDAR"""
         self.assertEqual(len(events), 4)  # 20th, 21st, 22nd, 23rd
 
 
+class IcalRecurrenceOverrideTests(unittest.TestCase):
+    """An override VEVENT (same UID + RECURRENCE-ID) replaces one occurrence."""
+
+    MASTER = """BEGIN:VEVENT
+UID:series-1@example.com
+SUMMARY:Fortnightly meeting
+DTSTART:20260826T150000
+DTEND:20260826T160000
+RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=WE;UNTIL=20261021T150000
+END:VEVENT
+"""
+
+    def parse(self, *vevents):
+        ics_data = "BEGIN:VCALENDAR\nVERSION:2.0\n" + "".join(vevents) + "END:VCALENDAR"
+        return fetch_events.parse_ics(
+            ics_data, {"name": "Work"}, datetime(2026, 8, 1), datetime(2026, 11, 30, 23, 59, 59)
+        )
+
+    @staticmethod
+    def override(extra="", uid="series-1@example.com", rid="RECURRENCE-ID:20260923T150000",
+                 start="20260923T150000", end="20260923T160000"):
+        return (f"BEGIN:VEVENT\nUID:{uid}\n{rid}\nSUMMARY:Edited meeting\n"
+                f"DTSTART:{start}\nDTEND:{end}\n{extra}END:VEVENT\n")
+
+    @staticmethod
+    def on(events, day):
+        return [(e["title"], e["start_dt"].strftime("%H:%M")) for e in events if e["date_key"] == day]
+
+    def test_edited_occurrence_replaces_master_instance(self):
+        events = self.parse(self.MASTER, self.override())
+        self.assertEqual(self.on(events, "2026-09-23"), [("Edited meeting", "15:00")])
+        self.assertEqual(self.on(events, "2026-10-07"), [("Fortnightly meeting", "15:00")])
+
+    def test_moved_occurrence_leaves_original_date(self):
+        events = self.parse(self.MASTER, self.override(start="20260924T100000", end="20260924T110000"))
+        self.assertEqual(self.on(events, "2026-09-23"), [])
+        self.assertEqual(self.on(events, "2026-09-24"), [("Edited meeting", "10:00")])
+
+    def test_cancelled_occurrence_removes_master_instance(self):
+        events = self.parse(self.MASTER, self.override("STATUS:CANCELLED\n"))
+        self.assertEqual(self.on(events, "2026-09-23"), [])
+        self.assertEqual(len(events), 4)  # 26 Aug, 9 Sep, 7 Oct, 21 Oct
+
+    def test_utc_recurrence_id_matches_tzid_series(self):
+        if ZoneInfo is None:
+            self.skipTest("ZoneInfo not available")
+        # No BYDAY: the weekday comes from DTSTART, so this stays about matching
+        # the override to its occurrence in whatever zone the tests run in.
+        master = """BEGIN:VEVENT
+UID:series-1@example.com
+SUMMARY:Fortnightly meeting
+DTSTART;TZID=America/New_York:20260826T150000
+DTEND;TZID=America/New_York:20260826T160000
+RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=5
+END:VEVENT
+"""
+        # 15:00 EDT on 23 Sep is 19:00 UTC.
+        events = self.parse(master, self.override(
+            "STATUS:CANCELLED\n", rid="RECURRENCE-ID:20260923T190000Z",
+            start="20260923T190000Z", end="20260923T200000Z"))
+        occurrence = datetime(2026, 9, 23, 15, tzinfo=ZoneInfo("America/New_York")).astimezone()
+        self.assertEqual(self.on(events, occurrence.strftime("%Y-%m-%d")), [])
+        self.assertEqual(len(events), 4)
+
+    def test_override_for_another_uid_leaves_series_intact(self):
+        events = self.parse(self.MASTER, self.override("STATUS:CANCELLED\n", uid="other@example.com"))
+        self.assertEqual(self.on(events, "2026-09-23"), [("Fortnightly meeting", "15:00")])
+
+
+
 class GoogleAndJmapTimezoneIntegrationTests(unittest.TestCase):
     class FakeResponse:
         def __init__(self, url, payload=b"{}"):

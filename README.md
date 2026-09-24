@@ -242,7 +242,7 @@ JMAP is a modern, fast, JSON-based calendar standard ([RFC 9670](https://www.rfc
    - Set User Type to **External** (or **Internal** if using a company Google Workspace account).
    - Enter an app name (e.g., `Omarchy Calendar`) and save.
    - Under **Test users**, click **+ Add users** and **add your Google email address**.
-   - **Publish the app.** On the consent screen / **Audience** page, set **Publishing status** to **In production** (click **Publish app**). No Google review is needed for the read-only calendar scope; you will just see an "unverified app" warning once during sign-in.
+   - **Publish the app.** On the consent screen / **Audience** page, set **Publishing status** to **In production** (click **Publish app**). No Google review is needed for personal use of the `calendar.events` scope (read, create and delete events); you will just see an "unverified app" warning once during sign-in.
 
 > [!IMPORTANT]
 > Leaving the app in **Testing** status makes Google expire the refresh token after **7 days**. The plugin then shows `auth_expired` for that calendar and the events disappear until you sign in again. Publishing the app is what makes the connection permanent. If your Google account belongs to a Workspace organisation (school or company), choosing User Type **Internal** has the same effect.
@@ -269,6 +269,7 @@ python3 ~/.config/omarchy/plugins/promaa.clock/google-auth.py
 * **`Access blocked: App has not completed verification`**: Add your Google account email to **Test users** in the OAuth consent screen.
 * **Calendar disconnects every ~7 days / status `auth_expired`**: Your OAuth app is in **Testing** publishing status, so Google revokes the refresh token weekly. Set the app to **In production** (see step 1 above), then click **Reconnect** in the plugin settings or run `google-auth.py` once more. The plugin sends a desktop notification the first time Google rejects the saved login.
 * **`HTTP Error 404: Not Found`**: Check that the `googleCalendarId` is the exact Calendar ID (not the display name). Test the sync with `python3 ~/.config/omarchy/plugins/promaa.clock/fetch-events.py`.
+* **Adding or deleting a Google event fails with `403 insufficientPermissions`**: Logins made before v1.4.4 were granted the read-only scope. Click **Reconnect** in the plugin settings or run `google-auth.py` once more to grant the `calendar.events` scope; syncing keeps working in the meantime.
 
 
 ## Uninstallation & Clean Removal

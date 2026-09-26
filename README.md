@@ -190,13 +190,56 @@ to the same entry:
 3. Copy the `caldavUrl` of the calendar you want to write to into the entry.
 
 The same three fields work for any CalDAV server (Nextcloud, Radicale, Baïkal,
-Zimbra); only the discovery starting point differs, so set `caldavUrl` to the
-server root (e.g. `https://nextcloud.example.com/remote.php/dav/`) before running
-discovery. HTTPS is required, the credentials are never sent over plain HTTP, and
-a redirect off the calendar's own host is refused.
+Zimbra, Fastmail); only the discovery starting point differs, so set `caldavUrl`
+to the server address before running discovery. If that address is not itself a
+DAV resource, discovery falls back to its `/.well-known/caldav` URL (RFC 6764).
+HTTPS is required, the credentials are never sent over plain HTTP, and a redirect
+off the calendar's own host is refused. For servers other than iCloud the panel
+can do all of this for you; see [CalDAV account](#caldav-account-fastmail-nextcloud-radicale-baïkal).
 
 Since `calendars.json` then holds a password, keep it private: `chmod 600
 ~/.config/omarchy/calendars.json` (the plugin writes it that way itself).
+
+### CalDAV account (Fastmail, Nextcloud, Radicale, Baïkal)
+
+A CalDAV account holds several calendars, each at its own collection URL. The
+panel finds them for you, so there is no link to copy per calendar:
+
+1. Open **Settings (`󰒓`) $\rightarrow$ + Add Calendar $\rightarrow$ CalDAV**.
+2. Enter the **server address**, your **username** and an **app password**:
+
+   | Provider | Server address | Username | Password |
+   | --- | --- | --- | --- |
+   | Fastmail | `https://caldav.fastmail.com` *(default)* | your full Fastmail address | an app password with **CalDAV** access: **Settings** $\rightarrow$ **Privacy & Security** $\rightarrow$ **Manage app passwords** |
+   | Nextcloud | `https://cloud.example.com` | your Nextcloud user | an app password from **Personal settings** $\rightarrow$ **Security** |
+   | Radicale / Baïkal | your server's address | your user | your password |
+
+3. Click **Find calendars**, tick the ones you want and click **Add**.
+
+Each calendar is saved as its own entry and is read and written directly over
+CalDAV (a time-ranged `calendar-query`), so no published `.ics` link is needed.
+Task lists are skipped and each calendar keeps the color set on the server. The
+entry looks like this, if you prefer to write it by hand:
+
+```json
+{
+  "name": "Personal",
+  "type": "caldav",
+  "caldavUrl": "https://caldav.fastmail.com/dav/calendars/user/you@fastmail.com/<calendar-id>/",
+  "username": "you@fastmail.com",
+  "password": "your-app-password",
+  "color": "#d93531",
+  "enabled": true
+}
+```
+
+The same discovery is available from a terminal. It reads the credentials from
+stdin so they never appear in the process list:
+
+```bash
+printf '%s\n' '{"url":"https://caldav.fastmail.com","username":"you@fastmail.com","password":"app-password"}' \
+  | ~/.config/omarchy/plugins/promaa.clock/fetch-events.py --caldav-discover-server
+```
 
 ### Proton Calendar
 1. Open [Proton Calendar](https://calendar.proton.me/) on the web.

@@ -297,7 +297,9 @@ Panel {
   }
 
   function saveCalendars(list) {
-    pendingConfigJson = JSON.stringify(list, null, 2)
+    // One line: fetch-events.py reads stdin with readline() because the pipe
+    // stays open, so a pretty-printed payload would arrive as just "[".
+    pendingConfigJson = JSON.stringify(list)
     saveConfigProc.command = [
       "python3",
       Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),

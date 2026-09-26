@@ -1,4 +1,5 @@
 import base64
+import email.message
 import importlib.util
 import json
 import os
@@ -349,6 +350,142 @@ class FetchCalendarBasicAuthTests(unittest.TestCase):
         self.assertEqual(res["status"], "ok")
         self.assertEqual(len(captured), 1)
         self.assertIsNone(captured[0].get_header("Authorization"))
+
+
+FASTMAIL = {
+    "name": "https://caldav.fastmail.com",
+    "caldavUrl": "https://caldav.fastmail.com",
+    "username": "me@fastmail.com",
+    "password": "app-password",
+}
+
+
+def http_error(url, code, location=None):
+    headers = email.message.Message()
+    if location:
+        headers["Location"] = location
+    return urllib.error.HTTPError(url, code, "status", headers, None)
+
+
+class GenericServerDiscoveryTests(unittest.TestCase):
+    PRINCIPAL = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response>
+      <d:propstat><d:prop><d:current-user-principal>
+      <d:href>/dav/principals/user/me@fastmail.com/</d:href>
+      </d:current-user-principal></d:prop></d:propstat></d:response></d:multistatus>"""
+    HOME = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:response><d:propstat><d:prop><c:calendar-home-set>
+      <d:href>/dav/calendars/user/me@fastmail.com/</d:href>
+      </c:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>"""
+    LISTING = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"
+        xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
+      <d:response><d:href>/dav/calendars/user/me@fastmail.com/</d:href><d:propstat><d:prop>
+        <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+      <d:response><d:href>/dav/calendars/user/me@fastmail.com/abc-123/</d:href><d:propstat><d:prop>
+        <d:displayname>Personal</d:displayname>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set>
+        <a:calendar-color>#3A87ADFF</a:calendar-color>
+      </d:prop></d:propstat></d:response>
+      <d:response><d:href>/dav/calendars/user/me@fastmail.com/todo/</d:href><d:propstat><d:prop>
+        <d:displayname>Tasks</d:displayname>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>
+      </d:prop></d:propstat></d:response>
+    </d:multistatus>"""
+
+    def test_a_bare_fastmail_address_resolves_through_its_well_known_redirect(self):
+        sent, patch = capture_requests([
+            http_error("https://caldav.fastmail.com/", 404),
+            http_error("https://caldav.fastmail.com/.well-known/caldav", 301,
+                       "https://caldav.fastmail.com/dav/calendars"),
+            FakeResponse(self.PRINCIPAL, status=207),
+            FakeResponse(self.HOME, status=207),
+            FakeResponse(self.LISTING, status=207),
+        ])
+        with patch:
+            found = fetch_events.caldav_discover_server(
+                {"url": FASTMAIL["caldavUrl"], "username": FASTMAIL["username"], "password": "app-password"}
+            )
+        self.assertEqual([r.full_url for r in sent[:3]], [
+            "https://caldav.fastmail.com/",
+            "https://caldav.fastmail.com/.well-known/caldav",
+            "https://caldav.fastmail.com/dav/calendars",
+        ])
+        self.assertTrue(all(r.get_method() == "PROPFIND" for r in sent))
+        # The task list is dropped; the event calendar keeps its server color.
+        self.assertEqual(found, [{
+            "name": "Personal",
+            "caldavUrl": "https://caldav.fastmail.com/dav/calendars/user/me@fastmail.com/abc-123/",
+            "color": "#3a87ad",
+        }])
+
+    def test_a_well_known_redirect_to_another_origin_is_refused(self):
+        sent, patch = capture_requests([
+            http_error("https://caldav.fastmail.com/", 404),
+            http_error("https://caldav.fastmail.com/.well-known/caldav", 301,
+                       "https://attacker.example/dav/"),
+        ])
+        with patch, self.assertRaises(ValueError):
+            fetch_events.caldav_discover(FASTMAIL)
+        self.assertEqual(len(sent), 2)
+        self.assertFalse(any("attacker" in r.full_url for r in sent))
+
+    def test_rejected_credentials_are_reported_without_trying_well_known(self):
+        sent, patch = capture_requests([http_error("https://caldav.fastmail.com/", 401)])
+        with patch, self.assertRaisesRegex(ValueError, "rejected the credentials"):
+            fetch_events.caldav_discover(FASTMAIL)
+        self.assertEqual(len(sent), 1)
+
+    def test_server_discovery_requires_an_address(self):
+        with self.assertRaisesRegex(ValueError, "server address"):
+            fetch_events.caldav_discover_server({"username": "u", "password": "p"})
+
+
+class CaldavReadTests(unittest.TestCase):
+    ENTRY = {
+        "name": "Personal",
+        "type": "caldav",
+        "caldavUrl": "https://caldav.fastmail.com/dav/calendars/user/me@fastmail.com/abc-123/",
+        "username": "me@fastmail.com",
+        "password": "app-password",
+        "color": "#3a87ad",
+    }
+    REPORT = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:response><d:href>/dav/calendars/user/me@fastmail.com/abc-123/one.ics</d:href>
+      <d:propstat><d:prop><c:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:one
+SUMMARY:Dentist
+DTSTART:20260910T150000Z
+DTEND:20260910T160000Z
+END:VEVENT
+END:VCALENDAR
+</c:calendar-data></d:prop></d:propstat></d:response>
+    </d:multistatus>"""
+
+    def test_an_entry_without_a_feed_url_is_read_with_a_calendar_query(self):
+        sent, patch = capture_requests([FakeResponse(self.REPORT, status=207)])
+        start = fetch_events.datetime(2026, 9, 1)
+        end = fetch_events.datetime(2026, 9, 30)
+        with patch:
+            result = fetch_events.fetch_calendar_item(self.ENTRY, start, end)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["type"], "caldav")
+        self.assertEqual([e["title"] for e in result["events"]], ["Dentist"])
+        self.assertTrue(result["events"][0]["writable"])
+        self.assertEqual(sent[0].get_method(), "REPORT")
+        self.assertEqual(sent[0].full_url, self.ENTRY["caldavUrl"])
+        self.assertEqual(sent[0].get_header("Depth"), "1")
+        self.assertIn(b"time-range", sent[0].data)
+
+    def test_a_read_failure_becomes_a_calendar_status(self):
+        sent, patch = capture_requests([http_error(self.ENTRY["caldavUrl"], 401)])
+        start = fetch_events.datetime(2026, 9, 1)
+        with patch:
+            result = fetch_events.fetch_caldav_calendar(self.ENTRY, start, start)
+        self.assertEqual(result["events"], [])
+        self.assertIn("rejected the credentials", result["status"])
 
 
 if __name__ == "__main__":

@@ -191,12 +191,94 @@ Panel {
 
   property bool addingCalendar: false
   property string formName: ""
-  property string formType: "url" // "url", "googleId", "jmap", "local"
+  property string formType: "url" // "url", "googleId", "jmap", "caldav", "local"
   property string formAddress: ""
   property string formJmapUrl: ""
   property string formJmapToken: ""
   property string formColor: "#4285f4"
   property string pendingConfigJson: ""
+
+  // CalDAV discovery: one server address + login lists every event calendar
+  // in the account, so the user never has to dig out collection URLs.
+  property string formCaldavServer: ""
+  property string formCaldavUser: ""
+  property string formCaldavPassword: ""
+  property var discoveredCalendars: []
+  property var discoveredSelected: []
+  property string caldavDiscoverError: ""
+  property string pendingDiscoverJson: ""
+  readonly property bool caldavDiscovering: caldavDiscoverProc.running
+  readonly property int discoveredSelectedCount: {
+    var n = 0
+    for (var i = 0; i < discoveredSelected.length; i++) if (discoveredSelected[i]) n++
+    return n
+  }
+
+  function resetCaldavForm() {
+    formCaldavServer = "https://caldav.fastmail.com"
+    formCaldavUser = ""
+    formCaldavPassword = ""
+    discoveredCalendars = []
+    discoveredSelected = []
+    caldavDiscoverError = ""
+    pendingDiscoverJson = ""
+  }
+
+  function cancelAddingCalendar() {
+    addingCalendar = false
+    resetCaldavForm()
+  }
+
+  function caldavAlreadyAdded(url) {
+    var list = root.configuredCalendars || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].caldavUrl === url) return true
+    }
+    return false
+  }
+
+  function discoverCaldav() {
+    if (caldavDiscoverProc.running) return
+    if (!formCaldavServer.trim() || !formCaldavUser.trim() || !formCaldavPassword) return
+    discoveredCalendars = []
+    discoveredSelected = []
+    caldavDiscoverError = ""
+    pendingDiscoverJson = JSON.stringify({
+      url: formCaldavServer.trim(),
+      username: formCaldavUser.trim(),
+      password: formCaldavPassword
+    })
+    caldavDiscoverProc.running = true
+  }
+
+  function handleCaldavDiscovery(text) {
+    var parsed = null
+    try {
+      parsed = JSON.parse(text)
+    } catch (e) {
+      caldavDiscoverError = "Discovery failed: unexpected response"
+      return
+    }
+    if (!Array.isArray(parsed)) {
+      caldavDiscoverError = (parsed && parsed.message) || "Discovery failed"
+      return
+    }
+    if (parsed.length === 0) {
+      caldavDiscoverError = "No event calendars found on this account"
+      return
+    }
+    var selected = []
+    for (var i = 0; i < parsed.length; i++) selected.push(!caldavAlreadyAdded(parsed[i].caldavUrl))
+    discoveredCalendars = parsed
+    discoveredSelected = selected
+  }
+
+  function toggleDiscovered(index) {
+    if (caldavAlreadyAdded(discoveredCalendars[index].caldavUrl)) return
+    var selected = discoveredSelected.slice()
+    selected[index] = !selected[index]
+    discoveredSelected = selected
+  }
 
   function openSettings(tab) {
     showingShortcutsHelp = false
@@ -215,7 +297,9 @@ Panel {
   }
 
   function saveCalendars(list) {
-    pendingConfigJson = JSON.stringify(list, null, 2)
+    // One line: fetch-events.py reads stdin with readline() because the pipe
+    // stays open, so a pretty-printed payload would arrive as just "[".
+    pendingConfigJson = JSON.stringify(list)
     saveConfigProc.command = [
       "python3",
       Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),
@@ -255,12 +339,17 @@ Panel {
     formAddress = ""
     formJmapUrl = "https://api.fastmail.com/jmap/session"
     formJmapToken = ""
+    resetCaldavForm()
     formColor = formType === "googleId" ? "#e01b24" : (formType === "jmap" ? "#ff7700" : (formType === "local" ? "#a6e3a1" : "#4285f4"))
     addingCalendar = true
     if (calendarScroll) calendarScroll.contentY = 0
   }
 
   function commitNewCalendar() {
+    if (formType === "caldav") {
+      commitDiscoveredCalendars()
+      return
+    }
     if (!formName.trim()) return
     var list = JSON.parse(JSON.stringify(root.configuredCalendars))
     var item = {
@@ -288,6 +377,28 @@ Panel {
     list.push(item)
     saveCalendars(list)
     addingCalendar = false
+  }
+
+  function commitDiscoveredCalendars() {
+    var list = JSON.parse(JSON.stringify(root.configuredCalendars))
+    var added = 0
+    for (var i = 0; i < discoveredCalendars.length; i++) {
+      var cal = discoveredCalendars[i]
+      if (!discoveredSelected[i] || caldavAlreadyAdded(cal.caldavUrl)) continue
+      list.push({
+        name: cal.name || ("CalDAV " + (i + 1)),
+        color: cal.color || Model.CALENDAR_COLORS[(list.length) % Model.CALENDAR_COLORS.length],
+        enabled: true,
+        type: "caldav",
+        caldavUrl: cal.caldavUrl,
+        username: formCaldavUser.trim(),
+        password: formCaldavPassword
+      })
+      added++
+    }
+    if (added === 0) return
+    saveCalendars(list)
+    cancelAddingCalendar()
   }
 
   function openGoogleAuth() {
@@ -697,6 +808,24 @@ Panel {
   }
 
   Process {
+    id: caldavDiscoverProc
+    command: [
+      "python3",
+      Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),
+      "--caldav-discover-server"
+    ]
+    stdinEnabled: true
+    onStarted: {
+      write(root.pendingDiscoverJson + "\n")
+      root.pendingDiscoverJson = ""
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleCaldavDiscovery(text)
+    }
+  }
+
+  Process {
     id: createEventProc
     stdinEnabled: true
     onStarted: {
@@ -792,6 +921,9 @@ Panel {
                                             (calAddressInput && calAddressInput.activeFocus) ||
                                             (calJmapUrlInput && calJmapUrlInput.activeFocus) ||
                                             (calJmapTokenInput && calJmapTokenInput.activeFocus) ||
+                                            (calCaldavServerInput && calCaldavServerInput.activeFocus) ||
+                                            (calCaldavUserInput && calCaldavUserInput.activeFocus) ||
+                                            (calCaldavPasswordInput && calCaldavPasswordInput.activeFocus) ||
                                             (eventTitleInput && eventTitleInput.activeFocus) ||
                                             (eventLocInput && eventLocInput.activeFocus) ||
                                             (eventDescInput && eventDescInput.activeFocus)
@@ -2645,8 +2777,9 @@ Panel {
                 font.letterSpacing: 1
               }
 
-              // Type Selector: iCal URL vs Google API ID vs JMAP
-              Row {
+              // Type Selector: iCal URL vs Google API ID vs JMAP vs CalDAV
+              Flow {
+                width: parent.width
                 spacing: Style.space(8)
 
                 Rectangle {
@@ -2737,6 +2870,32 @@ Panel {
                 }
 
                 Rectangle {
+                  width: typeCaldavText.implicitWidth + Style.space(14)
+                  height: Style.space(24)
+                  radius: Style.cornerRadius
+                  color: root.formType === "caldav" ? Color.accent : "transparent"
+                  border.width: root.formType === "caldav" ? 0 : Style.spacing.hairline
+                  border.color: Qt.darker(root.contentForeground, 1.8)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: typeCaldavText
+                    anchors.centerIn: parent
+                    text: "CalDAV (Fastmail, Nextcloud)"
+                    color: root.formType === "caldav" ? Color.background : root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: root.formType === "caldav"
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.formType = "caldav"
+                  }
+                }
+
+                Rectangle {
                   width: typeLocalText.implicitWidth + Style.space(14)
                   height: Style.space(24)
                   radius: Style.cornerRadius
@@ -2769,6 +2928,7 @@ Panel {
               // Name Field
               TextField {
                 id: calNameInput
+                visible: root.formType !== "caldav"
                 width: parent.width
                 placeholderText: "Calendar Name (e.g. Personal, Proton, Local Work)"
                 text: root.formName
@@ -2804,7 +2964,7 @@ Panel {
               // Address / ID Field (not needed for Local)
               TextField {
                 id: calAddressInput
-                visible: root.formType !== "local"
+                visible: root.formType !== "local" && root.formType !== "caldav"
                 width: parent.width
                 placeholderText: root.formType === "googleId"
                   ? "Google Calendar ID (e.g. xyz@group.calendar.google.com)"
@@ -2817,9 +2977,172 @@ Panel {
                 onTextChanged: root.formAddress = text
               }
 
+              // CalDAV account (CalDAV only): discovery lists its calendars
+              TextField {
+                id: calCaldavServerInput
+                visible: root.formType === "caldav"
+                width: parent.width
+                placeholderText: "Server address (e.g. https://caldav.fastmail.com)"
+                text: root.formCaldavServer
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                onTextChanged: root.formCaldavServer = text
+              }
 
-              // Color picker row
+              TextField {
+                id: calCaldavUserInput
+                visible: root.formType === "caldav"
+                width: parent.width
+                placeholderText: "Username (usually your full email address)"
+                text: root.formCaldavUser
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                onTextChanged: root.formCaldavUser = text
+              }
+
+              TextField {
+                id: calCaldavPasswordInput
+                visible: root.formType === "caldav"
+                width: parent.width
+                password: true
+                placeholderText: "App password (Fastmail: Settings > Privacy & Security)"
+                text: root.formCaldavPassword
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                onTextChanged: root.formCaldavPassword = text
+                onAccepted: root.discoverCaldav()
+              }
+
               Row {
+                visible: root.formType === "caldav"
+                width: parent.width
+                spacing: Style.space(8)
+
+                Rectangle {
+                  id: findCalendarsBtn
+                  readonly property bool canFind: !root.caldavDiscovering
+                    && Boolean(root.formCaldavServer.trim() && root.formCaldavUser.trim() && root.formCaldavPassword)
+                  width: findCalendarsText.implicitWidth + Style.space(16)
+                  height: Style.space(26)
+                  radius: Style.cornerRadius
+                  color: "transparent"
+                  border.width: Style.spacing.hairline
+                  border.color: Color.accent
+                  opacity: canFind ? 1.0 : 0.4
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: findCalendarsText
+                    anchors.centerIn: parent
+                    text: root.caldavDiscovering ? "Searching..." : "Find calendars"
+                    color: root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: parent.canFind
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.discoverCaldav()
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - findCalendarsBtn.width - parent.spacing
+                  visible: root.caldavDiscoverError !== ""
+                  text: root.caldavDiscoverError
+                  color: Color.accent
+                  wrapMode: Text.Wrap
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              // Discovered calendars: tick the ones to add
+              Column {
+                visible: root.formType === "caldav" && root.discoveredCalendars.length > 0
+                width: parent.width
+                spacing: Style.space(4)
+
+                Repeater {
+                  model: root.discoveredCalendars
+
+                  Rectangle {
+                    required property var modelData
+                    required property int index
+                    readonly property bool added: root.caldavAlreadyAdded(modelData.caldavUrl)
+                    readonly property bool checked: added || !!root.discoveredSelected[index]
+                    width: parent.width
+                    height: Style.space(26)
+                    radius: Style.cornerRadius
+                    color: discoveredMouse.containsMouse && !added
+                      ? Style.hoverFillFor(root.contentForeground, Color.accent) : "transparent"
+
+                    Row {
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(6)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(8)
+
+                      Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(14)
+                        height: Style.space(14)
+                        radius: Style.space(3)
+                        color: checked ? Color.accent : "transparent"
+                        border.width: checked ? 0 : Style.spacing.hairline
+                        border.color: Qt.darker(root.contentForeground, 1.5)
+                        opacity: added ? 0.5 : 1.0
+
+                        Text {
+                          textFormat: Text.PlainText
+                          anchors.centerIn: parent
+                          visible: checked
+                          text: "✓"
+                          color: Color.background
+                          font.pixelSize: Style.font.caption
+                          font.bold: true
+                        }
+                      }
+
+                      Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(10)
+                        height: Style.space(10)
+                        radius: width / 2
+                        color: modelData.color || Color.accent
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: (modelData.name || "Untitled") + (added ? "  (already added)" : "")
+                        color: added ? Qt.darker(root.contentForeground, 1.8) : root.contentForeground
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+
+                    MouseArea {
+                      id: discoveredMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      enabled: !added
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleDiscovered(index)
+                    }
+                  }
+                }
+              }
+
+
+              // Color picker row (CalDAV calendars keep their server colors)
+              Row {
+                visible: root.formType !== "caldav"
                 width: parent.width
                 spacing: Style.space(12)
 
@@ -2883,12 +3206,14 @@ Panel {
                     id: cancelMouse
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.addingCalendar = false
+                    onClicked: root.cancelAddingCalendar()
                   }
                 }
 
                 Rectangle {
-                  readonly property bool isFormValid: root.formType === "local"
+                  readonly property bool isFormValid: root.formType === "caldav"
+                    ? root.discoveredSelectedCount > 0
+                    : root.formType === "local"
                     ? Boolean(root.formName.trim())
                     : (root.formType === "jmap"
                        ? Boolean(root.formName.trim() && root.formJmapToken.trim())
@@ -2903,7 +3228,9 @@ Panel {
                     textFormat: Text.PlainText
                     id: addBtnText
                     anchors.centerIn: parent
-                    text: "Add Calendar"
+                    text: root.formType === "caldav"
+                      ? (root.discoveredSelectedCount > 1 ? "Add " + root.discoveredSelectedCount + " Calendars" : "Add Calendar")
+                      : "Add Calendar"
                     color: Color.background
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -3028,7 +3355,7 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: (modelData.type === "jmap" || modelData.jmapToken) ? "JMAP" : (modelData.googleCalendarId ? "GOOGLE API" : "ICAL FEED")
+                        text: (modelData.type === "jmap" || modelData.jmapToken) ? "JMAP" : (modelData.googleCalendarId ? "GOOGLE API" : ((modelData.type === "caldav" && !modelData.url) ? "CALDAV" : "ICAL FEED"))
                         color: Qt.darker(root.contentForeground, 1.9)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -3046,7 +3373,7 @@ Panel {
                             : (root.googleAuthIssue.kind === "expired"
                                 ? "Google login expired - click 󰌆 to reconnect"
                                 : "Google login required - click 󰌆 to connect"))
-                        : ((modelData.type === "jmap" || modelData.jmapToken) ? (modelData.jmapUrl || "JMAP Feed") : (modelData.googleCalendarId || modelData.url || "No address"))
+                        : ((modelData.type === "jmap" || modelData.jmapToken) ? (modelData.jmapUrl || "JMAP Feed") : (modelData.googleCalendarId || modelData.url || modelData.caldavUrl || "No address"))
                       color: loginProblem ? Color.accent : Qt.darker(root.contentForeground, 1.9)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption

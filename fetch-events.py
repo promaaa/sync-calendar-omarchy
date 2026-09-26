@@ -1812,6 +1812,8 @@ def fetch_calendar_item(cal_info, window_start, window_end):
         return fetch_local_calendar(cal_info, window_start, window_end)
     elif cal_type == "jmap" or cal_info.get("jmapToken") or ("jmap" in cal_info.get("url", "").lower() and "jmapToken" in cal_info):
         return fetch_jmap_calendar(cal_info, window_start, window_end)
+    elif not str(cal_info.get("url") or "").strip() and has_caldav_write(cal_info):
+        return fetch_caldav_calendar(cal_info, window_start, window_end)
     elif cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("jmapToken")):
         return fetch_google_api_calendar(cal_info, window_start, window_end)
     else:
@@ -2474,8 +2476,9 @@ def caldav_error(exc, cal_info):
     """Turn an HTTP failure into something a panel user can act on."""
     name = cal_info.get("name", "CalDAV calendar")
     if exc.code in (401, 403):
-        return (f"{name} rejected the credentials. Apple iCloud needs an app-specific "
-                "password from appleid.apple.com, not your Apple ID password.")
+        return (f"{name} rejected the credentials. Use an app-specific password, not your "
+                "account password: Apple iCloud issues them at appleid.apple.com, Fastmail "
+                "under Settings > Privacy & Security > Manage app passwords (CalDAV access).")
     if exc.code == 404:
         return f'{name}: CalDAV collection not found - check "caldavUrl".'
     if exc.code == 507:
@@ -2648,15 +2651,32 @@ def delete_caldav_event(cal_info, event_id):
 
 
 CALDAV_PROPFIND = """<?xml version="1.0" encoding="utf-8"?>
-<d:propfind xmlns:d="DAV:" xmlns:c="{ns}"><d:prop>{props}</d:prop></d:propfind>"""
+<d:propfind xmlns:d="DAV:" xmlns:c="{ns}" xmlns:a="{apple}"><d:prop>{props}</d:prop></d:propfind>"""
+CALDAV_APPLE_NS = "http://apple.com/ns/ical/"
+CALDAV_REDIRECT_CODES = (301, 302, 303, 307, 308)
+CALDAV_MAX_REDIRECTS = 3
 
 
 def caldav_propfind(url, origin, auth, props, depth="0"):
-    _, text = caldav_request(
-        origin, auth, "PROPFIND", url, CALDAV_PROPFIND.format(ns=CALDAV_NS, props=props),
-        headers={"Content-Type": "application/xml; charset=utf-8", "Depth": depth},
-    )
-    return ET.fromstring(text)
+    """PROPFIND that follows redirects, but only within the account's origin.
+
+    urllib only replays GET/HEAD after a redirect, so a PROPFIND answered with
+    301 (Fastmail's /.well-known/caldav does this) surfaces as an HTTPError.
+    caldav_request re-validates every hop, so a Location on another origin is
+    refused rather than followed with the credentials attached.
+    """
+    body = CALDAV_PROPFIND.format(ns=CALDAV_NS, apple=CALDAV_APPLE_NS, props=props)
+    headers = {"Content-Type": "application/xml; charset=utf-8", "Depth": depth}
+    for _ in range(CALDAV_MAX_REDIRECTS + 1):
+        try:
+            _, text = caldav_request(origin, auth, "PROPFIND", url, body, headers=headers)
+            return ET.fromstring(text)
+        except urllib.error.HTTPError as exc:
+            location = exc.headers.get("Location") if exc.headers is not None else None
+            if exc.code not in CALDAV_REDIRECT_CODES or not location:
+                raise
+            url = urllib.parse.urljoin(url, location.strip())
+    raise ValueError("CalDAV server redirected too many times.")
 
 
 def caldav_prop_href(tree, tag, base):
@@ -2668,40 +2688,147 @@ def caldav_prop_href(tree, tag, base):
     return None
 
 
+def caldav_find_principal(url, origin, auth):
+    tree = caldav_propfind(url, origin, auth, "<d:current-user-principal/>")
+    return caldav_prop_href(tree, "{DAV:}current-user-principal", url)
+
+
+def caldav_color(response):
+    """Server-assigned calendar color as #RRGGBB, when there is a valid one."""
+    node = response.find(".//{%s}calendar-color" % CALDAV_APPLE_NS)
+    value = (node.text or "").strip() if node is not None else ""
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?", value):
+        return value[:7].lower()
+    return ""
+
+
+def caldav_holds_events(response):
+    """False for task lists and other collections that cannot store VEVENTs."""
+    components = response.find(".//{%s}supported-calendar-component-set" % CALDAV_NS)
+    if components is None:
+        return True
+    names = {str(comp.get("name", "")).upper() for comp in components.iter("{%s}comp" % CALDAV_NS)}
+    return not names or "VEVENT" in names
+
+
 def caldav_discover(cal_info):
-    """List an account's calendar collections, for pasting into "caldavUrl"."""
+    """List an account's event calendars, starting from a server address.
+
+    The address users are given (https://caldav.fastmail.com, a Nextcloud
+    host, ...) is often not itself a DAV resource, so when it yields no
+    principal the RFC 6764 /.well-known/caldav bootstrap is tried next.
+    """
     base = str(cal_info.get("caldavUrl") or "").strip() or CALDAV_DEFAULT_HOST
     url, origin, auth = caldav_auth(cal_info, base)
     try:
-        principal = caldav_prop_href(
-            caldav_propfind(url, origin, auth, "<d:current-user-principal/>"),
-            "{DAV:}current-user-principal", url,
-        )
+        try:
+            principal = caldav_find_principal(url, origin, auth)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise
+            principal = None
+        except ET.ParseError:
+            principal = None
         if not principal:
-            raise ValueError("Server returned no user principal - check the username and password.")
+            parts = urllib.parse.urlsplit(url)
+            well_known = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/.well-known/caldav", "", ""))
+            principal = caldav_find_principal(well_known, origin, auth)
+        if not principal:
+            raise ValueError("Server returned no user principal - check the server address, username and password.")
         home = caldav_prop_href(
             caldav_propfind(principal, origin, auth, "<c:calendar-home-set/>"),
             "{%s}calendar-home-set" % CALDAV_NS, principal,
         )
         if not home:
             raise ValueError("Server returned no calendar home for this account.")
-        tree = caldav_propfind(home, origin, auth, "<d:displayname/><d:resourcetype/>", depth="1")
+        tree = caldav_propfind(
+            home, origin, auth,
+            "<d:displayname/><d:resourcetype/><c:supported-calendar-component-set/><a:calendar-color/>",
+            depth="1",
+        )
     except urllib.error.HTTPError as exc:
         raise ValueError(caldav_error(exc, cal_info)) from exc
+    except ET.ParseError as exc:
+        raise ValueError("CalDAV server sent a response that is not valid XML.") from exc
 
     collections = []
     for response in tree.iter("{DAV:}response"):
         if response.find(".//{DAV:}resourcetype/{%s}calendar" % CALDAV_NS) is None:
             continue
+        if not caldav_holds_events(response):
+            continue
         href = response.find("{DAV:}href")
         if href is None or not (href.text or "").strip():
             continue
         name = response.find(".//{DAV:}displayname")
-        collections.append({
+        entry = {
             "name": (name.text or "").strip() if name is not None else "",
             "caldavUrl": urllib.parse.urljoin(home, href.text.strip()),
-        })
+        }
+        color = caldav_color(response)
+        if color:
+            entry["color"] = color
+        collections.append(entry)
     return collections
+
+
+def caldav_discover_server(payload):
+    """Discovery for the panel: a server address plus credentials, no saved entry."""
+    if not isinstance(payload, dict):
+        raise ValueError("Expected a JSON object with url, username and password")
+    server = str(payload.get("url") or "").strip()
+    if not server:
+        raise ValueError("Enter the CalDAV server address, e.g. https://caldav.fastmail.com")
+    return caldav_discover({
+        "name": server,
+        "caldavUrl": server,
+        "username": payload.get("username"),
+        "password": payload.get("password"),
+    })
+
+
+CALDAV_EVENT_QUERY = """<?xml version="1.0" encoding="utf-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="{ns}">
+  <d:prop><c:calendar-data/></d:prop>
+  <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+    <c:time-range start="{start}" end="{end}"/>
+  </c:comp-filter></c:comp-filter></c:filter>
+</c:calendar-query>"""
+
+
+def fetch_caldav_calendar(cal_info, window_start, window_end):
+    """Read a CalDAV collection directly, for entries with no published .ics feed."""
+    name = cal_info.get("name", "CalDAV Calendar")
+    color = cal_info.get("color", "#4A90E2")
+    try:
+        url, origin, auth = caldav_credentials(cal_info)
+        body = CALDAV_EVENT_QUERY.format(
+            ns=CALDAV_NS,
+            start=ics_utc_stamp(window_start),
+            end=ics_utc_stamp(window_end + timedelta(days=1)),
+        )
+        try:
+            _, text = caldav_request(
+                origin, auth, "REPORT", url, body,
+                headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+            )
+        except urllib.error.HTTPError as exc:
+            raise ValueError(caldav_error(exc, cal_info)) from exc
+        tree = ET.fromstring(text)
+        objects = [(node.text or "") for node in tree.iter("{%s}calendar-data" % CALDAV_NS)]
+        events = parse_ics("\r\n".join(objects), cal_info, window_start, window_end)
+        return {
+            "name": name,
+            "color": color,
+            "type": "caldav",
+            "writable": True,
+            "events": events,
+            "status": "ok",
+            "count": len(events),
+        }
+    except Exception as e:
+        return {"name": name, "color": color, "type": "caldav", "writable": True,
+                "events": [], "status": f"error: {str(e)}", "count": 0}
 
 
 def find_calendar_config(cal_name_or_id):
@@ -2863,6 +2990,7 @@ def sync_all_events():
             c.get("googleCalendarId") or
             c.get("calendarId") or
             c.get("jmapToken") or
+            has_caldav_write(c) or
             str(c.get("type", "")).lower() == "jmap" or
             str(c.get("type", "")).lower() == "local"
         )
@@ -3079,6 +3207,15 @@ def main():
                 try:
                     target = sys.argv[2] if len(sys.argv) > 2 else ""
                     print(json.dumps(caldav_discover(find_calendar_config(target)), ensure_ascii=False, indent=2))
+                    sys.exit(0)
+                except Exception as e:
+                    print(json.dumps({"status": "error", "message": str(e)}))
+                    sys.exit(1)
+            elif arg == "--caldav-discover-server":
+                try:
+                    # Credentials arrive on stdin so they never show up in the process list.
+                    payload = json.loads(read_stdin_payload(MAX_CONFIG_BYTES) or "{}")
+                    print(json.dumps(caldav_discover_server(payload), ensure_ascii=False, indent=2))
                     sys.exit(0)
                 except Exception as e:
                     print(json.dumps({"status": "error", "message": str(e)}))

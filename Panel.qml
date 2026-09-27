@@ -342,8 +342,21 @@ Panel {
   // Summoning by hotkey moves no pointer, so a hover the bar was still
   // holding must not keep the center indicators revealed behind the panel.
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
-      root.bar.centerHoverRevealSuppressed = value
+    if (!root.bar) return
+    // Omarchy hands plugins a PluginBarApi whose centerHoverRevealSuppressed is
+    // readonly, so assigning it throws. This runs as the first statement of
+    // close(), and an exception there aborts the function before
+    // controller.hide() — leaving the full-screen overlay mapped and the
+    // session unclickable. Prefer the setter the API exposes, and never let
+    // this call be the reason the panel stays open.
+    try {
+      if (typeof root.bar.setCenterHoverRevealSuppressed === "function")
+        root.bar.setCenterHoverRevealSuppressed(value)
+      else if ("centerHoverRevealSuppressed" in root.bar)
+        root.bar.centerHoverRevealSuppressed = value
+    } catch (e) {
+      // Non-fatal: the bar keeps its hover reveal, the panel still closes.
+    }
   }
 
   function syncCalendars(force) {

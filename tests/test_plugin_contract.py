@@ -46,6 +46,25 @@ class PluginManifestContractTests(unittest.TestCase):
 
 
 class ShippedSourceContractTests(unittest.TestCase):
+    def test_stdin_payloads_are_sent_on_a_single_line(self):
+        # fetch-events.py reads one line from the still-open pipe, so an indented
+        # JSON.stringify(x, null, 2) payload is truncated to "[" and never saved.
+        panel = (ROOT / "Panel.qml").read_text(encoding="utf-8")
+        self.assertNotRegex(panel, r"JSON\.stringify\([^)]*,\s*null\s*,")
+
+    def test_a_single_line_config_payload_is_saved(self):
+        import os, subprocess, tempfile
+        with tempfile.TemporaryDirectory() as home:
+            payload = json.dumps([{"name": "Personal", "type": "caldav"}]) + "\n"
+            result = subprocess.run(
+                ["python3", str(ROOT / "fetch-events.py"), "--save-config"],
+                input=payload, capture_output=True, text=True, timeout=30,
+                env={**os.environ, "HOME": home},
+            )
+            self.assertEqual(json.loads(result.stdout)["status"], "success", result.stdout)
+            saved = json.loads((Path(home) / ".config/omarchy/calendars.json").read_text())
+            self.assertEqual(saved[0]["name"], "Personal")
+
     def test_no_leftover_merge_conflict_markers(self):
         # One stray marker in Panel.qml shipped in v1.4.1 and v1.4.2: QML refused
         # the whole file, so the popup never opened while the bar still looked fine.

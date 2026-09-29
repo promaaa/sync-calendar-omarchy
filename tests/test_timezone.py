@@ -3,6 +3,7 @@ from datetime import datetime, date, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import time
 import unittest
 from unittest import mock
 
@@ -246,6 +247,82 @@ END:VCALENDAR"""
 
         events = fetch_events.parse_ics(ics_data, cal_info, window_start, window_end)
         self.assertEqual(len(events), 4)  # 20th, 21st, 22nd, 23rd
+
+
+class IcalZonedRecurrenceTests(unittest.TestCase):
+    """RRULEs expand in DTSTART's zone, viewed from a zone on the other side of midnight."""
+
+    NEW_YORK = "America/New_York"
+
+    def setUp(self):
+        if ZoneInfo is None or not hasattr(time, "tzset"):
+            self.skipTest("ZoneInfo or time.tzset not available")
+        self._saved_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Seoul"
+        time.tzset()
+
+    def tearDown(self):
+        if self._saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._saved_tz
+        time.tzset()
+
+    def expand(self, dtstart, rrule, window_end=datetime(2026, 12, 31, 23, 59, 59)):
+        ics_data = f"""BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:ny-series@example.com
+SUMMARY:Standup
+DTSTART;TZID={self.NEW_YORK}:{dtstart}
+DURATION:PT30M
+RRULE:{rrule}
+END:VEVENT
+END:VCALENDAR"""
+        events = fetch_events.parse_ics(ics_data, {"name": "Work"}, datetime(2026, 8, 1), window_end)
+        return [e["start_dt"] for e in events]
+
+    def seoul(self, *args):
+        return datetime(*args, tzinfo=ZoneInfo(self.NEW_YORK)).astimezone().replace(tzinfo=None)
+
+    def test_byday_follows_the_series_zone(self):
+        # Wednesdays 15:00 in New York are Thursdays 04:00 in Seoul.
+        starts = self.expand("20260902T150000", "FREQ=WEEKLY;BYDAY=WE;COUNT=3")
+        self.assertEqual(starts, [self.seoul(2026, 9, d, 15) for d in (2, 9, 16)])
+        self.assertEqual({s.strftime("%a %H:%M") for s in starts}, {"Thu 04:00"})
+
+    def test_series_keeps_its_wall_time_across_its_own_dst_change(self):
+        # New York leaves DST on 1 Nov 2026; Seoul has none, so the local hour moves.
+        starts = self.expand("20261028T150000", "FREQ=WEEKLY;COUNT=2")
+        self.assertEqual(starts, [self.seoul(2026, 10, 28, 15), self.seoul(2026, 11, 4, 15)])
+        self.assertEqual([s.strftime("%H:%M") for s in starts], ["04:00", "05:00"])
+
+    def test_monthly_byday_follows_the_series_zone(self):
+        # Last Friday of the month, 20:00 in New York: Saturday morning in Seoul.
+        starts = self.expand("20260925T200000", "FREQ=MONTHLY;BYDAY=-1FR;COUNT=2")
+        self.assertEqual(starts, [self.seoul(2026, 9, 25, 20), self.seoul(2026, 10, 30, 20)])
+
+    def test_utc_and_floating_until_are_both_honoured(self):
+        # 16 Sep 15:00 New York is 19:00 UTC; a floating UNTIL is on the series' clock.
+        for until in ("20260916T190000Z", "20260916T150000"):
+            starts = self.expand("20260902T150000", f"FREQ=WEEKLY;BYDAY=WE;UNTIL={until}")
+            self.assertEqual(starts, [self.seoul(2026, 9, d, 15) for d in (2, 9, 16)], until)
+
+    def test_exdate_removes_the_converted_occurrence(self):
+        ics_data = f"""BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:ny-series@example.com
+SUMMARY:Standup
+DTSTART;TZID={self.NEW_YORK}:20260902T150000
+DURATION:PT30M
+RRULE:FREQ=WEEKLY;BYDAY=WE;COUNT=3
+EXDATE;TZID={self.NEW_YORK}:20260909T150000
+END:VEVENT
+END:VCALENDAR"""
+        events = fetch_events.parse_ics(ics_data, {"name": "Work"}, datetime(2026, 8, 1), datetime(2026, 12, 31))
+        self.assertEqual([e["start_dt"] for e in events], [self.seoul(2026, 9, d, 15) for d in (2, 16)])
+
 
 
 class IcalRecurrenceOverrideTests(unittest.TestCase):

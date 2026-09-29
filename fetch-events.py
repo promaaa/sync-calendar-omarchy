@@ -361,6 +361,23 @@ def extract_tzid(params):
     return None
 
 
+def value_zone(val_str, params=None):
+    """
+    Return the tzinfo an iCal DATE-TIME value is written in: UTC for a trailing Z,
+    a fixed offset for +HH:MM / -HHMM, the TZID parameter's zone, or None for
+    floating values and unknown zones.
+    """
+    val_str = val_str.strip()
+    if val_str.endswith("Z"):
+        return timezone.utc
+    offset_match = re.search(r"([+-])(\d\d):?(\d\d)$", val_str)
+    if offset_match:
+        sign = -1 if offset_match.group(1) == "-" else 1
+        delta = timedelta(hours=int(offset_match.group(2)), minutes=int(offset_match.group(3)))
+        return timezone(sign * delta)
+    return resolve_timezone(extract_tzid(params))
+
+
 def parse_datetime_value(val_str, params=None):
     """
     Parse an iCal date or datetime string into local wall time.
@@ -386,10 +403,6 @@ def parse_datetime_value(val_str, params=None):
         except ValueError:
             pass
 
-    # Capture the zone marker before it is stripped off for parsing
-    is_utc = val_str.endswith("Z")
-    offset_match = re.search(r"([+-])(\d\d):?(\d\d)$", val_str)
-
     # Try datetime formats: 20260816T143000Z or 20260816T143000
     cleaned = re.sub(r"[+-]\d\d:?\d\d$", "", val_str).rstrip("Z")
     # Strip subsecond fractions if present (e.g. .000 or .123456)
@@ -404,16 +417,8 @@ def parse_datetime_value(val_str, params=None):
         except ValueError:
             continue
 
-        if is_utc:
-            return False, to_local_naive(dt, timezone.utc)
-        if offset_match:
-            sign = -1 if offset_match.group(1) == "-" else 1
-            delta = timedelta(hours=int(offset_match.group(2)), minutes=int(offset_match.group(3)))
-            return False, to_local_naive(dt, timezone(sign * delta))
-        zone = resolve_timezone(extract_tzid(params))
-        if zone is not None:
-            return False, to_local_naive(dt, zone)
-        return False, dt
+        zone = value_zone(val_str, params)
+        return False, (to_local_naive(dt, zone) if zone is not None else dt)
 
     try:
         d = datetime.strptime(val_str[:8], "%Y%m%d").date()
@@ -807,13 +812,58 @@ def expand_yearly(event, window_start, window_end, rrule, until_dt, max_count):
 
 def expand_recurring_event(event, window_start, window_end):
     """
-    Expands a recurring VEVENT within [window_start, window_end].
+    Expands a recurring VEVENT within [window_start, window_end] (local wall time).
     Bounded by MAX_RECURRENCE_ITERATIONS and MAX_EXPANDED_INSTANCES.
+
+    RRULE parts (BYDAY, BYMONTHDAY, the time of day) are defined in DTSTART's own
+    zone, so a zoned series is expanded in that zone and each occurrence is then
+    converted to local time. Expanding the local copy instead puts a Wednesday
+    15:00 New York meeting on Wednesday in Seoul, a day early, and drifts it an
+    hour whenever only one of the two zones changes DST.
     """
-    rrule = event.get("rrule")
-    if not rrule:
+    if not event.get("rrule"):
         return [event]
 
+    zone = event.get("tz")
+    if zone is None:
+        return expand_rrule_in_wall_time(event, window_start, window_end)
+
+    def to_source(local_dt):
+        return local_dt.astimezone(zone).replace(tzinfo=None)
+
+    source = dict(event)
+    source["start_dt"] = to_source(event["start_dt"])
+    source["end_dt"] = to_source(event["end_dt"])
+    # EXDATE and override keys are local dates, so they are applied after
+    # conversion rather than against source-zone dates.
+    source["exdates"] = []
+    slack = timedelta(days=1)
+    occurrences = expand_rrule_in_wall_time(
+        source, to_source(window_start) - slack, to_source(window_end) + slack, zone
+    )
+
+    exdates = set(event.get("exdates", []))
+    instances = []
+    for inst in occurrences:
+        start_dt = to_local_naive(inst["start_dt"], zone)
+        date_key = start_dt.strftime("%Y-%m-%d")
+        if not window_start <= start_dt <= window_end or date_key in exdates:
+            continue
+        inst["start_dt"] = start_dt
+        inst["end_dt"] = to_local_naive(inst["end_dt"], zone)
+        inst["date_key"] = date_key
+        inst["exdates"] = event.get("exdates", [])
+        instances.append(inst)
+    return instances
+
+
+def expand_rrule_in_wall_time(event, window_start, window_end, zone=None):
+    """
+    Expands an RRULE on naive datetimes that share one wall clock. `zone` is the
+    clock's tzinfo when it is not local time, so a UTC UNTIL can be moved onto it;
+    a floating UNTIL is already on DTSTART's clock (RFC 5545 3.3.10).
+    """
+    rrule = event["rrule"]
     freq = rrule.get("FREQ", "").upper()
     until_str = rrule.get("UNTIL")
     count_str = rrule.get("COUNT")
@@ -823,6 +873,8 @@ def expand_recurring_event(event, window_start, window_end):
         is_all_day_until, parsed_until = parse_datetime_value(until_str)
         if is_all_day_until:
             until_dt = datetime(parsed_until.year, parsed_until.month, parsed_until.day, 23, 59, 59)
+        elif zone is not None and value_zone(until_str) is not None:
+            until_dt = parsed_until.astimezone(zone).replace(tzinfo=None)
         else:
             until_dt = parsed_until
         if until_dt < window_start:
@@ -842,7 +894,7 @@ def expand_recurring_event(event, window_start, window_end):
     else:
         if start_dt.strftime("%Y-%m-%d") not in event.get("exdates", []):
             if window_start <= start_dt <= window_end:
-                return [event]
+                return [dict(event)]
         return []
 
 
@@ -944,6 +996,8 @@ def parse_ics(content, cal_info, window_start, window_end):
             all_day, dt = parse_datetime_value(val_part, prop_params)
             current["DTSTART"] = dt
             current["all_day"] = all_day
+            # The zone the series is defined in; recurring events expand there.
+            current["TZ"] = None if all_day else value_zone(val_part, prop_params)
         elif prop_name == "DTEND":
             _, dt = parse_datetime_value(val_part, prop_params)
             current["DTEND"] = dt
@@ -1024,6 +1078,7 @@ def parse_ics(content, cal_info, window_start, window_end):
             "meetingUrl": meeting_url or "",
             "meetingProvider": meeting_provider or "",
             "rrule": raw.get("RRULE"),
+            "tz": raw.get("TZ"),
             "exdates": raw.get("exdates", []),
         }
 

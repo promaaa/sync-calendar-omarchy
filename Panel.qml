@@ -176,6 +176,10 @@ Panel {
         root.eventErrorMessage = "Enter times like 14:30 or 2:30pm"
         return
       }
+      if (endTime <= startTime) {
+        root.eventErrorMessage = "The end time must be after the start time"
+        return
+      }
       root.eventStartTime = startTime
       root.eventEndTime = endTime
     }
@@ -221,6 +225,22 @@ Panel {
     })
   }
 
+  // Delete takes two clicks: the first arms the button for a few seconds.
+  property string deleteArmedId: ""
+  property string agendaErrorMessage: ""
+
+  function requestDelete(evt) {
+    if (!evt || !evt.id) return
+    var key = evt.calendar + "/" + evt.id
+    if (root.deleteArmedId === key) {
+      root.deleteArmedId = ""
+      root.deleteEvent(evt)
+    } else {
+      root.deleteArmedId = key
+      deleteArmTimer.restart()
+    }
+  }
+
   function deleteEvent(evt) {
     if (!evt || !evt.id) return
     var payload = {
@@ -232,7 +252,15 @@ Panel {
     backend.enqueue({
       command: ["python3", root.backendScript, "--delete-event"],
       stdin: JSON.stringify(payload),
-      done: function(text) { eventsFile.reload() }
+      done: function(text) {
+        var result = null
+        try { result = JSON.parse(text) } catch (e) {}
+        if (!result || result.status !== "success") {
+          root.agendaErrorMessage = "Could not delete \"" + (evt.title || "event") + "\": " + ((result && result.message) || "no answer from the backend")
+          agendaErrorTimer.restart()
+        }
+        eventsFile.reload()
+      }
     })
   }
 
@@ -483,8 +511,11 @@ Panel {
 
   function checkUpcomingNotifications() {
     if (!root.notifyUpcomingEvents) return
-    var todayEvents = root.eventsByDate[root.todayKey] || []
     var nowMs = Date.now()
+    // Include tomorrow: an event at 00:10 is due for a reminder before midnight.
+    var tomorrow = new Date(nowMs + 86400000)
+    var tomorrowKey = Model.dateKey(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate())
+    var todayEvents = (root.eventsByDate[root.todayKey] || []).concat(root.eventsByDate[tomorrowKey] || [])
     var settingVal = root.notifyMinutesBefore
 
     for (var i = 0; i < todayEvents.length; i++) {
@@ -737,6 +768,18 @@ Panel {
   JobQueue { id: backend }
   JobQueue { id: notifyQueue }
 
+  Timer {
+    id: deleteArmTimer
+    interval: 4000
+    onTriggered: root.deleteArmedId = ""
+  }
+
+  Timer {
+    id: agendaErrorTimer
+    interval: 8000
+    onTriggered: root.agendaErrorMessage = ""
+  }
+
   Process {
     id: openUrlProc
   }
@@ -810,6 +853,9 @@ Panel {
                                             (calJmapUrlInput && calJmapUrlInput.activeFocus) ||
                                             (calJmapTokenInput && calJmapTokenInput.activeFocus) ||
                                             (eventTitleInput && eventTitleInput.activeFocus) ||
+                                            (eventDateInput && eventDateInput.activeFocus) ||
+                                            (eventStartInput && eventStartInput.activeFocus) ||
+                                            (eventEndInput && eventEndInput.activeFocus) ||
                                             (eventLocInput && eventLocInput.activeFocus) ||
                                             (eventDescInput && eventDescInput.activeFocus)
       blocked: root.editingLife || hasActiveInput
@@ -1158,11 +1204,18 @@ Panel {
             height: gridColumn.y + gridColumn.height
 
             WheelHandler {
+              // A touchpad sends many small deltas for one swipe: add them up
+              // and move one month per wheel notch (120 units).
+              property real pending: 0
               onWheel: function(event) {
                 // Horizontal wheels and touchpad side-scrolls report y === 0;
                 // without this they would every one read as "next month".
                 if (event.angleDelta.y === 0) return
-                root.moveMonth(event.angleDelta.y > 0 ? -1 : 1)
+                pending += event.angleDelta.y
+                while (Math.abs(pending) >= 120) {
+                  root.moveMonth(pending > 0 ? -1 : 1)
+                  pending -= pending > 0 ? 120 : -120
+                }
               }
             }
 
@@ -1866,6 +1919,7 @@ Panel {
 
                 // Date Input
                 TextField {
+                  id: eventDateInput
                   width: Style.space(110)
                   placeholderText: "YYYY-MM-DD"
                   text: root.eventDate
@@ -1970,6 +2024,7 @@ Panel {
 
                     // Start Time Input
                     TextField {
+                      id: eventStartInput
                       visible: !root.eventAllDay
                       width: Style.space(70)
                       placeholderText: "09:00"
@@ -1990,6 +2045,7 @@ Panel {
 
                     // End Time Input
                     TextField {
+                      id: eventEndInput
                       visible: !root.eventAllDay
                       width: Style.space(70)
                       placeholderText: "10:00"
@@ -2254,6 +2310,17 @@ Panel {
               }
             }
 
+            Text {
+              width: parent.width
+              visible: root.agendaErrorMessage.length > 0
+              text: root.agendaErrorMessage
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.urgent
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+            }
+
             // Events List
             Column {
               width: parent.width
@@ -2284,16 +2351,23 @@ Panel {
                   // Edit and delete buttons for writable events
                   PanelActionButton {
                     id: deleteEventButton
+                    readonly property bool armed: root.deleteArmedId === modelData.calendar + "/" + modelData.id
                     visible: Boolean(modelData.writable)
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.margins: Style.space(4)
-                    iconText: "󰆴"
-                    tooltipText: "Delete event from " + (modelData.calendar || "calendar")
-                    foreground: root.contentForeground
+                    iconText: deleteEventButton.armed ? "󰄬" : "󰆴"
+                    // A CalDAV resource holds the whole series: deleting an
+                    // occurrence deletes every occurrence.
+                    tooltipText: deleteEventButton.armed
+                      ? (modelData.recurring && modelData.calendarType === "caldav"
+                         ? "Click again to delete ALL occurrences of this series"
+                         : "Click again to delete")
+                      : "Delete event from " + (modelData.calendar || "calendar")
+                    foreground: deleteEventButton.armed ? Color.urgent : root.contentForeground
                     fontFamily: root.contentFontFamily
-                    opacity: 0.65
-                    onClicked: root.deleteEvent(modelData)
+                    opacity: deleteEventButton.armed ? 1 : 0.65
+                    onClicked: root.requestDelete(modelData)
                   }
 
                   PanelActionButton {
@@ -2837,6 +2911,7 @@ Panel {
                 visible: root.formType === "jmap"
                 width: parent.width
                 placeholderText: "JMAP API / Bearer Token"
+                password: true
                 text: root.formJmapToken
                 foreground: root.contentForeground
                 font.family: root.contentFontFamily

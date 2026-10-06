@@ -353,3 +353,49 @@ class FetchCalendarBasicAuthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaldavReadTests(unittest.TestCase):
+    """An entry with CalDAV credentials is read with a REPORT, not the feed."""
+
+    MULTISTATUS = """<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response><d:href>/1234/calendars/home/a.ics</d:href><d:propstat><d:prop>
+    <d:getetag>"1"</d:getetag>
+    <c:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VEVENT&#13;
+UID:a&#13;
+SUMMARY:Lunch&#13;
+DTSTART:20260910T120000&#13;
+DTEND:20260910T130000&#13;
+END:VEVENT&#13;
+END:VCALENDAR&#13;
+</c:calendar-data></d:prop></d:propstat></d:response>
+</d:multistatus>"""
+
+    WINDOW = (fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 30))
+
+    def test_caldav_only_entry_is_read_with_report(self):
+        cal = {k: v for k, v in ICLOUD.items() if k != "url"}
+        sent, patch = capture_requests([FakeResponse(self.MULTISTATUS)])
+        with patch:
+            result = fetch_events.fetch_calendar_item(cal, *self.WINDOW)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual([e["title"] for e in result["events"]], ["Lunch"])
+        self.assertTrue(result["events"][0]["writable"])
+        self.assertEqual(sent[0].get_method(), "REPORT")
+        self.assertIn(b"time-range", sent[0].data)
+
+    def test_failed_report_falls_back_to_the_published_feed(self):
+        error = urllib.error.HTTPError(ICLOUD["caldavUrl"], 403, "Forbidden", {}, None)
+        _, patch = capture_requests([error])
+        with patch, mock.patch.object(fetch_events, "fetch_calendar", return_value={"status": "ok"}) as feed:
+            result = fetch_events.fetch_calendar_item(ICLOUD, *self.WINDOW)
+        self.assertEqual(result, {"status": "ok"})
+        feed.assert_called_once()
+
+    def test_entry_without_credentials_is_still_read_from_the_feed(self):
+        cal = {"name": "Feed", "url": "https://example.com/cal.ics"}
+        with mock.patch.object(fetch_events, "fetch_calendar", return_value={"status": "ok"}) as feed:
+            fetch_events.fetch_calendar_item(cal, *self.WINDOW)
+        feed.assert_called_once()

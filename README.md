@@ -189,6 +189,10 @@ to the same entry:
 
 3. Copy the `caldavUrl` of the calendar you want to write to into the entry.
 
+With these three fields the plugin reads the calendar over CalDAV too, so
+changes from other devices appear at the next sync. The `url` (the published
+link) becomes optional: the plugin reads it only when the CalDAV read fails.
+
 The same three fields work for any CalDAV server (Nextcloud, Radicale, Baïkal,
 Zimbra); only the discovery starting point differs, so set `caldavUrl` to the
 server root (e.g. `https://nextcloud.example.com/remote.php/dav/`) before running

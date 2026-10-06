@@ -1823,6 +1823,8 @@ def fetch_calendar_item(cal_info, window_start, window_end):
         return fetch_jmap_calendar(cal_info, window_start, window_end)
     elif cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("jmapToken")):
         return fetch_google_api_calendar(cal_info, window_start, window_end)
+    elif has_caldav_write(cal_info):
+        return fetch_caldav_calendar(cal_info, window_start, window_end)
     else:
         return fetch_calendar(cal_info, window_start, window_end)
 
@@ -2676,6 +2678,58 @@ def caldav_find_href(url, origin, auth, uid):
     return None
 
 
+CALDAV_RANGE_QUERY = """<?xml version="1.0" encoding="utf-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="{ns}">
+  <d:prop><d:getetag/><c:calendar-data/></d:prop>
+  <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+    <c:time-range start="{start}" end="{end}"/>
+  </c:comp-filter></c:comp-filter></c:filter>
+</c:calendar-query>"""
+
+
+def fetch_caldav_calendar(cal_info, window_start, window_end):
+    """
+    Read a CalDAV collection with one calendar-query REPORT over the window.
+    The server returns every resource with an occurrence in the window, each
+    with its full iCalendar data (the master RRULE included), so the result
+    goes through the same parser as an .ics feed. If the REPORT fails and the
+    entry also has a published .ics URL, that feed is read instead.
+    """
+    name = cal_info.get("name", "Calendar")
+    color = cal_info.get("color", "#4A90E2")
+    try:
+        url, origin, auth = caldav_credentials(cal_info)
+
+        def utc(dt):
+            return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+        body = CALDAV_RANGE_QUERY.format(ns=CALDAV_NS, start=utc(window_start), end=utc(window_end))
+        text, _ = caldav_request(
+            origin, auth, "REPORT", url, body,
+            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+        )
+        tree = ET.fromstring(text)
+        content = "\r\n".join(
+            node.text for node in tree.iter(f"{{{CALDAV_NS}}}calendar-data") if node.text
+        )
+        events = parse_ics(content, cal_info, window_start, window_end)
+    except Exception as e:
+        if str(cal_info.get("url") or "").strip():
+            return fetch_calendar(cal_info, window_start, window_end)
+        if isinstance(e, urllib.error.HTTPError):
+            e = caldav_error(e, cal_info)
+        return {"name": name, "color": color, "events": [], "status": f"error: {e}", "count": 0}
+    return {
+        "name": name,
+        "color": color,
+        "type": "caldav",
+        "writable": True,
+        "events": events,
+        "status": "ok",
+        "count": len(events),
+    }
+
+
 def delete_caldav_event(cal_info, event_id):
     """Delete an event from a CalDAV collection."""
     url, origin, auth = caldav_credentials(cal_info)
@@ -2971,6 +3025,7 @@ def sync_all_events():
         c for c in calendars
         if isinstance(c, dict) and c.get("enabled", True) and (
             c.get("url") or
+            has_caldav_write(c) or
             c.get("googleCalendarId") or
             c.get("calendarId") or
             c.get("jmapToken") or

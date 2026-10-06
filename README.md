@@ -10,7 +10,7 @@ omarchy plugin add https://github.com/promaaa/sync-calendar-omarchy.git --enable
 ![GitHub stars](https://img.shields.io/github/stars/promaaa/sync-calendar-omarchy?style=flat-square)
 ![License](https://img.shields.io/github/license/promaaa/sync-calendar-omarchy?style=flat-square)
 
-Follows your Omarchy theme (the shots below are three different ones). Works with the stock Omarchy Quattro bar and with Shibumi Shell. Python 3 standard library only, no pip packages, no daemon, no sudo.
+Follows your Omarchy theme (the shots below are three different ones). Works with the stock Omarchy Quattro bar and with Shibumi Shell. Python 3 standard library only, no pip packages, no system service, no sudo.
 
 ![The calendar panel open on an Omarchy desktop](full-preview.webp)
 
@@ -38,7 +38,7 @@ Follows your Omarchy theme (the shots below are three different ones). Works wit
 - **Quick Add**: Type a sentence in the title field, such as `Lunch tomorrow 1pm-2pm`, `Standup friday 9:30-9:45` or `Dentiste demain 14h`, then press Enter. The plugin fills the date and times and keeps `Lunch` as the title. You still review and save the event.
 - **12/24-Hour Time Preference**: Switch the clock, agenda, notifications, and copied agenda times between 12-hour and 24-hour display.
 - **Visual Event Indicators**: Days with events show subtle colored dots corresponding to the calendar source.
-- **Fast & Non-Blocking**: Background multi-threaded event fetcher with zero UI freezes.
+- **Fast & Non-Blocking**: One background helper process (`fetch-events.py --serve`, about 35 MB) runs every sync and edit in turn, so edits never race. The shell starts it and stops it; it restarts by itself after a crash. Each sync downloads only what changed.
 - **Recurring & Multi-Day Events**: Full support for daily, weekly, monthly, and yearly recurring events (`RRULE` / `EXDATE`) and multi-day spans.
 
 ### Keyboard Shortcuts & Vim Navigation

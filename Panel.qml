@@ -49,7 +49,7 @@ Panel {
   readonly property string selectedDateLabel: Model.formatSelectedDateLabel(selectedDateKey, todayKey, Qt.locale())
   readonly property int configuredCalendarCount: eventsData.configuredCount || 0
   property double lastSyncTimestamp: 0
-  readonly property bool syncRunning: backend.busy && backend.current.key === "sync"
+  readonly property bool syncRunning: backend.syncRunning
   readonly property string backendScript: Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, "")
   readonly property bool notifyUpcomingEvents: root.setting("notifyUpcomingEvents", true)
   readonly property var notifyMinutesBefore: root.setting("notifyMinutesBefore", "staged")
@@ -249,20 +249,14 @@ Panel {
       payload.calendarType = editing.calendarType || "local"
     }
 
-    backend.enqueue({
-      command: ["python3", root.backendScript, editing ? "--update-event" : "--create-event"],
-      stdin: JSON.stringify(payload),
-      done: function(text) {
-        root.eventSubmitting = false
-        var result = null
-        try { result = JSON.parse(text) } catch (e) {}
-        if (!result || result.status !== "success") {
-          root.eventErrorMessage = (result && result.message) || "Could not save the event"
-        } else {
-          root.addingEvent = false
-        }
-        eventsFile.reload()
+    backend.call(editing ? "update-event" : "create-event", payload, function(result) {
+      root.eventSubmitting = false
+      if (result.status !== "success") {
+        root.eventErrorMessage = result.message || "Could not save the event"
+      } else {
+        root.addingEvent = false
       }
+      eventsFile.reload()
     })
   }
 
@@ -290,18 +284,12 @@ Panel {
       calendarId: evt.calendarId || "",
       calendarType: evt.calendarType || "local"
     }
-    backend.enqueue({
-      command: ["python3", root.backendScript, "--delete-event"],
-      stdin: JSON.stringify(payload),
-      done: function(text) {
-        var result = null
-        try { result = JSON.parse(text) } catch (e) {}
-        if (!result || result.status !== "success") {
-          root.agendaErrorMessage = "Could not delete \"" + (evt.title || "event") + "\": " + ((result && result.message) || "no answer from the backend")
-          agendaErrorTimer.restart()
-        }
-        eventsFile.reload()
+    backend.call("delete-event", payload, function(result) {
+      if (result.status !== "success") {
+        root.agendaErrorMessage = "Could not delete \"" + (evt.title || "event") + "\": " + (result.message || "no answer from the backend")
+        agendaErrorTimer.restart()
       }
+      eventsFile.reload()
     })
   }
 
@@ -353,16 +341,14 @@ Panel {
 
   function saveCalendars(list) {
     root.pendingCalendars = list
-    // One line: the backend reads the payload with readline().
-    backend.enqueue({
-      key: "config",
-      command: ["python3", root.backendScript, "--save-config"],
-      stdin: JSON.stringify(list),
-      done: function(text) {
-        if (!backend.hasWaiting("config")) root.pendingCalendars = null
-        configFile.reload()
-        root.syncCalendars(true)
+    backend.call("save-config", list, function(result) {
+      if (!backend.hasPending("save-config")) root.pendingCalendars = null
+      if (result.status !== "success") {
+        root.agendaErrorMessage = "Could not save the calendar settings: " + (result.message || "no answer from the backend")
+        agendaErrorTimer.restart()
       }
+      configFile.reload()
+      root.syncCalendars(true)
     })
   }
 
@@ -532,13 +518,9 @@ Panel {
     var now = Date.now()
     if (!force && (now - lastSyncTimestamp < 30000)) return
     lastSyncTimestamp = now
-    backend.enqueue({
-      key: "sync",
-      command: ["python3", root.backendScript],
-      done: function(text) {
-        eventsFile.reload()
-        root.checkUpcomingNotifications()
-      }
+    backend.call("sync", null, function(result) {
+      eventsFile.reload()
+      root.checkUpcomingNotifications()
     })
   }
 
@@ -774,9 +756,11 @@ Panel {
     onFileChanged: root.syncCalendars(true)
   }
 
-  // Backend calls run one at a time: two writes at once could undo each
-  // other, and a running Process ignores a second start.
-  JobQueue { id: backend }
+  // One long-lived backend process runs every call in turn, so two writes
+  // cannot undo each other.
+  Backend { id: backend; script: root.backendScript }
+  // Notifications are one-shot commands; a running Process ignores a second
+  // start, so they wait in a queue.
   JobQueue { id: notifyQueue }
 
   Timer {

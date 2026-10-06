@@ -557,13 +557,44 @@ function getWritableCalendars(configuredList) {
   return writables
 }
 
+// Parse a typed clock time into "HH:MM", or "" when it is not a valid time.
+// Accepts 24-hour ("14:30", "9:05", "14.30", "1430", "9") and 12-hour
+// ("2pm", "2:30 PM", "11:15 a.m.") input, since the form is a free-text field.
+function parseTimeInput(text) {
+  var s = String(text || "").toLowerCase().replace(/[\s.]/g, "")
+  var match = /^(\d{1,2})(?::?(\d{2}))?(am|pm|a|p)?$/.exec(s)
+  if (!match) return ""
+  var h = parseInt(match[1], 10)
+  var m = match[2] === undefined ? 0 : parseInt(match[2], 10)
+  var meridiem = match[3]
+  if (m > 59) return ""
+  if (meridiem) {
+    if (h < 1 || h > 12) return ""
+    h = h % 12 + (meridiem.charAt(0) === "p" ? 12 : 0)
+  } else if (h > 23) {
+    return ""
+  }
+  return pad2(h) + ":" + pad2(m)
+}
+
+// Parse a typed "YYYY-MM-DD" (single-digit month/day allowed) into a date
+// key, or "" when it is not a real calendar day.
+function parseDateInput(text) {
+  var match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(text || "").trim())
+  if (!match) return ""
+  var y = parseInt(match[1], 10)
+  var m = parseInt(match[2], 10) - 1
+  var d = parseInt(match[3], 10)
+  var date = new Date(y, m, d)
+  if (date.getFullYear() !== y || date.getMonth() !== m || date.getDate() !== d) return ""
+  return dateKey(y, m, d)
+}
+
 function calculateEndTime(startTimeStr, durationMinutes) {
-  if (!startTimeStr || startTimeStr.indexOf(":") === -1) return "10:00"
-  var parts = startTimeStr.split(":")
-  var h = parseInt(parts[0], 10)
-  var m = parseInt(parts[1], 10)
-  if (isNaN(h) || isNaN(m)) return "10:00"
-  var total = h * 60 + m + (durationMinutes || 60)
+  var start = parseTimeInput(startTimeStr)
+  if (!start) return "10:00"
+  var parts = start.split(":")
+  var total = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + (durationMinutes || 60)
   var endH = Math.floor(total / 60) % 24
   var endM = total % 60
   return pad2(endH) + ":" + pad2(endM)
@@ -605,6 +636,8 @@ if (typeof module !== "undefined") {
     parseCalendarsConfig: parseCalendarsConfig,
     formatAgendaMarkdown: formatAgendaMarkdown,
     getWritableCalendars: getWritableCalendars,
+    parseTimeInput: parseTimeInput,
+    parseDateInput: parseDateInput,
     calculateEndTime: calculateEndTime,
     stepDate: stepDate,
     stepToMonthBound: stepToMonthBound,

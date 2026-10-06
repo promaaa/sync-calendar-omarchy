@@ -265,5 +265,47 @@ class MainCrashShieldTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
 
 
+class GoogleEventWriteTests(unittest.TestCase):
+    """Events on a Google API calendar must be deletable and land at the time typed."""
+
+    CAL = {"name": "Work", "googleCalendarId": "work@group.calendar.google.com"}
+
+    def test_fetched_google_event_round_trips_into_a_delete_request(self):
+        listing = json.dumps({"items": [{
+            "id": "evt123",
+            "summary": "Dentist",
+            "start": {"dateTime": "2026-09-10T14:00:00Z"},
+            "end": {"dateTime": "2026-09-10T15:00:00Z"},
+        }]}).encode()
+        with mock.patch.object(fetch_events, "get_google_access_token", return_value="tok"), \
+             mock.patch.object(fetch_events.urllib.request, "urlopen", return_value=_FakeHTTPResponse(listing)):
+            result = fetch_events.fetch_google_api_calendar(
+                self.CAL, fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 30))
+        evt = result["events"][0]
+        self.assertTrue(evt["writable"])
+
+        # The payload Panel.qml deleteEvent() builds from the rendered event.
+        payload = {"id": evt["id"], "calendar": evt["calendar"],
+                   "calendarId": evt["calendarId"], "calendarType": evt["calendarType"]}
+        with mock.patch.object(fetch_events, "find_calendar_config", return_value=self.CAL), \
+             mock.patch.object(fetch_events, "get_google_access_token", return_value="tok"), \
+             mock.patch.object(fetch_events, "sync_all_events"), \
+             mock.patch.object(fetch_events.urllib.request, "urlopen", return_value=_FakeHTTPResponse(b"")) as urlopen:
+            fetch_events.delete_event(payload)
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.get_method(), "DELETE")
+        self.assertTrue(request.full_url.endswith("/calendars/work%40group.calendar.google.com/events/evt123"))
+
+    def test_unreadable_time_is_rejected_instead_of_booked_now(self):
+        with mock.patch.object(fetch_events, "find_calendar_config", return_value=self.CAL), \
+             mock.patch.object(fetch_events.urllib.request, "urlopen") as urlopen, \
+             self.assertRaises(ValueError):
+            fetch_events.create_event({"title": "x", "calendar": "Work",
+                                       "start": "2026-09-10T2pm:00", "end": "2026-09-10T3pm:00"})
+        urlopen.assert_not_called()
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

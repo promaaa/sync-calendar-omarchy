@@ -257,6 +257,13 @@ def ensure_config_exists():
 
 # Feeds and API answers are reused while the server says nothing changed.
 SYNC_CACHE_DIR = os.path.join(STATE_DIR, "sync-cache")
+
+# Secrets live in the desktop keyring (Secret Service, through libsecret's
+# secret-tool) when one runs. The JSON file then holds this marker instead.
+KEYRING_MARK = "@keyring"
+KEYRING_APP = "chronica"
+CALENDAR_SECRET_FIELDS = ("password", "jmapToken")
+GOOGLE_SECRET_FIELDS = ("refresh_token", "client_secret")
 # Windowed queries read this far past the window, so a cached answer still
 # covers the window as it moves forward during the next days.
 SYNC_REFRESH_MARGIN = timedelta(days=7)
@@ -289,6 +296,101 @@ def sync_cache_drop(path):
     try:
         os.unlink(path)
     except OSError:
+        pass
+
+
+def _secret_tool(args, value=None):
+    """Run secret-tool; returns stdout, or None when it fails or is missing."""
+    if not shutil.which("secret-tool"):
+        return None
+    try:
+        proc = subprocess.run(["secret-tool"] + args, input=value, capture_output=True,
+                              text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def stash_secrets(entry, fields, secret_id=None):
+    """
+    Move the plaintext secrets of one entry into the keyring, in place, and
+    put KEYRING_MARK in their place. A secret the keyring refuses stays in
+    the entry: it is never dropped. Returns True when the entry changed.
+    """
+    changed = False
+    for field in fields:
+        value = entry.get(field)
+        if not isinstance(value, str) or not value or value == KEYRING_MARK:
+            continue
+        sid = secret_id or entry.get("secretId") or secrets.token_hex(8)
+        stored = _secret_tool(["store", "--label", f"Chronica {entry.get('name') or sid} {field}",
+                               "application", KEYRING_APP, "secret-id", sid, "field", field], value)
+        if stored is not None:
+            if not secret_id:
+                entry["secretId"] = sid
+            entry[field] = KEYRING_MARK
+            changed = True
+    return changed
+
+
+def reveal_secrets(entry, fields, secret_id=None):
+    """A copy of the entry with its KEYRING_MARK values read back ("" if gone)."""
+    if not isinstance(entry, dict):
+        return entry
+    out = dict(entry)
+    sid = secret_id or entry.get("secretId")
+    for field in fields:
+        if out.get(field) == KEYRING_MARK:
+            found = _secret_tool(["lookup", "application", KEYRING_APP, "secret-id", str(sid), "field", field]) if sid else None
+            out[field] = found or ""
+    return out
+
+
+def forget_unused_secrets(calendars):
+    """Clear keyring items of calendars that were removed from the config."""
+    listing = _secret_tool(["search", "--all", "application", KEYRING_APP])
+    if not listing:
+        return
+    keep = {str(c.get("secretId")) for c in calendars if isinstance(c, dict) and c.get("secretId")}
+    keep.add("google")
+    for sid in set(re.findall(r"^attribute\.secret-id = (\S+)$", listing, re.M)) - keep:
+        _secret_tool(["clear", "application", KEYRING_APP, "secret-id", sid])
+
+
+def load_calendars():
+    """calendars.json with its keyring secrets filled in, for the fetchers."""
+    try:
+        calendars = safe_load_json(CONFIG_PATH, max_bytes=MAX_CONFIG_BYTES) or []
+    except Exception:
+        return []
+    if not isinstance(calendars, list):
+        return []
+    return [reveal_secrets(c, CALENDAR_SECRET_FIELDS) for c in calendars]
+
+
+def save_calendars(calendars):
+    """Write calendars.json with the secrets moved to the keyring when possible."""
+    for entry in calendars:
+        if isinstance(entry, dict):
+            stash_secrets(entry, CALENDAR_SECRET_FIELDS)
+    write_secure_json(CONFIG_PATH, calendars, mode=0o600)
+    forget_unused_secrets(calendars)
+
+
+def migrate_secrets_to_keyring():
+    """Move plaintext secrets of older configs into the keyring, once."""
+    try:
+        calendars = safe_load_json(CONFIG_PATH, max_bytes=MAX_CONFIG_BYTES)
+        if isinstance(calendars, list) and any(
+                isinstance(c, dict) and any(isinstance(c.get(f), str) and c.get(f) not in ("", KEYRING_MARK)
+                                            for f in CALENDAR_SECRET_FIELDS)
+                for c in calendars):
+            if any(stash_secrets(c, CALENDAR_SECRET_FIELDS) for c in calendars if isinstance(c, dict)):
+                write_secure_json(CONFIG_PATH, calendars, mode=0o600)
+        auth = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES)
+        if isinstance(auth, dict) and stash_secrets(auth, GOOGLE_SECRET_FIELDS, secret_id="google"):
+            write_secure_json(AUTH_FILE, auth, mode=0o600)
+    except Exception:
         pass
 
 
@@ -1136,9 +1238,11 @@ def resolve_google_access_token():
     if auth_data.get("access_token") and auth_data.get("expires_at", 0) > now + 60:
         return auth_data["access_token"], "ok", ""
 
-    refresh_token = auth_data.get("refresh_token")
+    # auth_data is written back as is, so it keeps the keyring markers.
+    revealed = reveal_secrets(auth_data, GOOGLE_SECRET_FIELDS, secret_id="google")
+    refresh_token = revealed.get("refresh_token")
     client_id = auth_data.get("client_id")
-    client_secret = auth_data.get("client_secret")
+    client_secret = revealed.get("client_secret")
     if not refresh_token or not client_id or not client_secret:
         return None, "missing", "incomplete credentials"
 
@@ -1430,6 +1534,7 @@ def fetch_calendar(cal_info, window_start, window_end):
             url = "https://" + raw_url
 
     headers = {"User-Agent": USER_AGENT}
+    auth_header = None
 
     try:
         if url.startswith("file://") or url.startswith("/"):
@@ -1457,9 +1562,11 @@ def fetch_calendar(cal_info, window_start, window_end):
                 pass_str = str(password)
                 if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in user_str + pass_str):
                     raise ValueError("Calendar username or password contains invalid characters")
+                if urllib.parse.urlsplit(url).scheme != "https":
+                    raise ValueError("Refusing to send the calendar password over plain http: use an https:// URL")
                 auth_str = f"{user_str}:{pass_str}"
                 auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("ascii")
-                headers["Authorization"] = f"Basic {auth_b64}"
+                auth_header = f"Basic {auth_b64}"
 
             # Ask the server to answer 304 when the feed did not change.
             cache_path = sync_cache_path("ics", url, username or "")
@@ -1471,6 +1578,12 @@ def fetch_calendar(cal_info, window_start, window_end):
                     headers["If-Modified-Since"] = cached["lastModified"]
 
             req = urllib.request.Request(url, headers=headers)
+            if auth_header:
+                # urllib copies normal headers to every redirect, even to
+                # another host; an unredirected header stays with this request.
+                # ponytail: a same-host redirect also drops it (the server then
+                # answers 401); follow redirects by hand if a feed needs that.
+                req.add_unredirected_header("Authorization", auth_header)
             resp_content = None
             # Retry transient connection resets / throttling (common on Apple iCloud CalDAV)
             for attempt in range(2):
@@ -1935,6 +2048,10 @@ def purge_plugin_data():
                 removed.append(target)
         except Exception as exc:
             errors.append(f"{target}: {exc}")
+
+    if _secret_tool(["search", "--all", "application", KEYRING_APP]):
+        if _secret_tool(["clear", "application", KEYRING_APP]) is not None:
+            removed.append("keyring: application=" + KEYRING_APP)
 
     try:
         if os.path.isdir(SYNC_CACHE_DIR) and not os.path.islink(SYNC_CACHE_DIR):
@@ -2957,7 +3074,7 @@ def caldav_discover(cal_info):
 def find_calendar_config(cal_name_or_id):
     """Find calendar entry matching name or ID from config, or default to local."""
     ensure_config_exists()
-    calendars = safe_load_json(CONFIG_PATH, max_bytes=MAX_CONFIG_BYTES) or []
+    calendars = load_calendars()
     target = str(cal_name_or_id or "").strip().lower()
 
     if target in ("", "local", "local calendar"):
@@ -3122,11 +3239,8 @@ def sync_all_events():
     ensure_config_exists()
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     load_translation_cache()
-
-    try:
-        calendars = safe_load_json(CONFIG_PATH, max_bytes=MAX_CONFIG_BYTES) or []
-    except Exception:
-        calendars = []
+    migrate_secrets_to_keyring()
+    calendars = load_calendars()
 
     now = datetime.now()
     window_start = now - timedelta(days=45)
@@ -3327,7 +3441,7 @@ def main():
                     new_config = json.loads(raw_input)
                     if not isinstance(new_config, list):
                         raise ValueError("Config must be a JSON array of calendar entries")
-                    write_secure_json(CONFIG_PATH, new_config, mode=0o600)
+                    save_calendars(new_config)
                     print(json.dumps({"status": "success"}))
                     sys.exit(0)
                 except Exception as e:

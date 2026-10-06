@@ -1743,18 +1743,6 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
     name = cal_info.get("name", "JMAP Calendar")
     color = cal_info.get("color", "#ff7700")
     token = (cal_info.get("jmapToken") or cal_info.get("token") or cal_info.get("bearerToken") or "").strip()
-    session_url = (cal_info.get("jmapUrl") or cal_info.get("sessionUrl") or cal_info.get("url") or "").strip()
-
-    if not session_url:
-        session_url = "https://api.fastmail.com/jmap/session"
-    elif "://" not in session_url:
-        session_url = "https://" + session_url
-
-    # Auto-resolve hostnames to .well-known/jmap if no path specified
-    parsed = urllib.parse.urlsplit(session_url)
-    if not parsed.path or parsed.path == "/":
-        session_url = urllib.parse.urlunsplit(parsed._replace(path="/.well-known/jmap"))
-
     if not token:
         return {
             "name": name,
@@ -1766,82 +1754,27 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
 
     cache_path = None
     try:
-        session_url, trusted_origin = validate_jmap_https_url(session_url)
-        opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(trusted_origin))
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
         cal_id = cal_info.get("jmapCalendarId") or cal_info.get("calendarId")
-        cache_path = sync_cache_path("jmap", session_url, cal_id or "", hashlib.sha256(token.encode("utf-8")).hexdigest())
+        cache_path = sync_cache_path("jmap", jmap_session_url(cal_info), cal_id or "",
+                                     hashlib.sha256(token.encode("utf-8")).hexdigest())
         cached = sync_cache_load(cache_path)
+        # Step 1: Session Discovery. The session rarely changes: reused for a day.
+        session = jmap_session(cal_info, cached)
+        api_url, account_id, jmap_using = session["api_url"], session["account_id"], session["using"]
 
-        def jmap_call(api_url, using, method_calls):
-            body = json.dumps({"using": using, "methodCalls": method_calls}).encode("utf-8")
-            req = urllib.request.Request(api_url, data=body, headers=headers, method="POST")
-            with open_trusted_jmap(opener, req, trusted_origin, timeout=15) as resp:
+        def jmap_call(method_calls):
+            body = json.dumps({"using": jmap_using, "methodCalls": method_calls}).encode("utf-8")
+            req = urllib.request.Request(api_url, data=body, headers=session["headers"], method="POST")
+            with open_trusted_jmap(session["opener"], req, session["origin"], timeout=15) as resp:
                 raw_data = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
                 return json.loads(raw_data.decode("utf-8")).get("methodResponses", [])
-
-        # Step 1: Session Discovery. The session rarely changes: reuse it for a day.
-        if cached.get("apiUrl") and cached.get("accountId") and time.time() - cached.get("sessionAt", 0) < 86400:
-            api_url, account_id, jmap_using = cached["apiUrl"], cached["accountId"], cached["using"]
-            api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
-        else:
-            req = urllib.request.Request(session_url, headers=headers, method="GET")
-            with open_trusted_jmap(opener, req, trusted_origin, timeout=12) as resp:
-                raw_session = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-                session_data = json.loads(raw_session.decode("utf-8"))
-
-            api_url = session_data.get("apiUrl")
-            if not api_url:
-                return {
-                    "name": name,
-                    "color": color,
-                    "events": [],
-                    "status": "error: no apiUrl in JMAP session response",
-                    "count": 0,
-                }
-            api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
-
-            # Find account supporting calendars
-            accounts = session_data.get("accounts", {})
-            primary_accounts = session_data.get("primaryAccounts", {})
-            account_id = primary_accounts.get("urn:ietf:params:jmap:calendars")
-
-            if not account_id:
-                for acc_id, acc_val in accounts.items():
-                    caps = acc_val.get("accountCapabilities", {})
-                    if any("calendar" in k.lower() for k in caps.keys()):
-                        account_id = acc_id
-                        break
-
-            if not account_id and accounts:
-                account_id = next(iter(accounts.keys()))
-
-            if not account_id:
-                return {
-                    "name": name,
-                    "color": color,
-                    "events": [],
-                    "status": "error: no JMAP calendar account found",
-                    "count": 0,
-                }
-
-            jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
-            for cap in session_data.get("capabilities", {}):
-                if "calendar" in cap.lower() and cap not in jmap_using:
-                    jmap_using.append(cap)
-            cached = {"apiUrl": api_url, "accountId": account_id, "using": jmap_using, "sessionAt": time.time()}
 
         # Step 2a: when no event changed since the last sync, its list still holds.
         raw_events = None
         if (cached.get("state") and isinstance(cached.get("list"), list)
                 and cached.get("start", "~") <= window_start.isoformat()
                 and cached.get("end", "") >= window_end.isoformat()):
-            changes = jmap_call(api_url, jmap_using, [
+            changes = jmap_call([
                 ["CalendarEvent/changes", {"accountId": account_id, "sinceState": cached["state"]}, "c0"],
             ])
             if changes and changes[0][0] == "CalendarEvent/changes":
@@ -1859,7 +1792,7 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
             if cal_id and cal_id != "primary":
                 cal_filter["inCalendars"] = [cal_id]
 
-            method_responses = jmap_call(api_url, jmap_using, [
+            method_responses = jmap_call([
                 ["CalendarEvent/query", {"accountId": account_id, "filter": cal_filter, "expandRecurrences": True}, "q0"],
                 ["CalendarEvent/get", {
                     "accountId": account_id,
@@ -2008,18 +1941,36 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
         }
 
 
-def fetch_calendar_item(cal_info, window_start, window_end):
+def calendar_kind(cal_info):
+    """
+    The one place that decides which backend serves a calendars.json entry:
+    "local", "jmap", "google", "caldav" (credentials, read and write), "ics"
+    (a read-only feed), or None when the entry names no source.
+    """
+    if not isinstance(cal_info, dict):
+        return None
     cal_type = str(cal_info.get("type", "")).lower()
     if cal_type == "local":
-        return fetch_local_calendar(cal_info, window_start, window_end)
-    elif cal_type == "jmap" or cal_info.get("jmapToken") or ("jmap" in cal_info.get("url", "").lower() and "jmapToken" in cal_info):
-        return fetch_jmap_calendar(cal_info, window_start, window_end)
-    elif cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("jmapToken")):
-        return fetch_google_api_calendar(cal_info, window_start, window_end)
-    elif has_caldav_write(cal_info):
-        return fetch_caldav_calendar(cal_info, window_start, window_end)
-    else:
-        return fetch_calendar(cal_info, window_start, window_end)
+        return "local"
+    if cal_type == "jmap" or "jmapToken" in cal_info:
+        return "jmap"
+    if cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("url")):
+        return "google"
+    if has_caldav_write(cal_info):
+        return "caldav"
+    if str(cal_info.get("url") or "").strip():
+        return "ics"
+    return None
+
+
+def fetch_calendar_item(cal_info, window_start, window_end):
+    fetcher = {
+        "local": fetch_local_calendar,
+        "jmap": fetch_jmap_calendar,
+        "google": fetch_google_api_calendar,
+        "caldav": fetch_caldav_calendar,
+    }.get(calendar_kind(cal_info), fetch_calendar)
+    return fetcher(cal_info, window_start, window_end)
 
 
 def purge_plugin_data():
@@ -2425,24 +2376,16 @@ def delete_google_event(cal_info, event_id):
     return {"status": "success", "id": event_id}
 
 
-def jmap_write_session(cal_info):
-    """Discover the JMAP API endpoint and calendar account used for writes."""
+def jmap_session(cal_info, cached=None):
+    """
+    Discover the JMAP API endpoint and calendar account of an entry. `cached`
+    (a sync-cache dict) holds a discovery less than a day old, which is reused,
+    and receives a new one otherwise.
+    """
     token = (cal_info.get("jmapToken") or cal_info.get("token") or cal_info.get("bearerToken") or "").strip()
-    session_url = (cal_info.get("jmapUrl") or cal_info.get("sessionUrl") or cal_info.get("url") or "").strip()
-
-    if not session_url:
-        session_url = "https://api.fastmail.com/jmap/session"
-    elif "://" not in session_url:
-        session_url = "https://" + session_url
-
-    parsed = urllib.parse.urlsplit(session_url)
-    if not parsed.path or parsed.path == "/":
-        session_url = urllib.parse.urlunsplit(parsed._replace(path="/.well-known/jmap"))
-
     if not token:
         raise ValueError("No JMAP bearer token configured")
-
-    session_url, trusted_origin = validate_jmap_https_url(session_url)
+    session_url, trusted_origin = validate_jmap_https_url(jmap_session_url(cal_info))
     opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(trusted_origin))
     headers = {
         "Authorization": f"Bearer {token}",
@@ -2450,6 +2393,12 @@ def jmap_write_session(cal_info):
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+    session = {"opener": opener, "headers": headers, "origin": trusted_origin}
+
+    if cached and cached.get("apiUrl") and cached.get("accountId") and time.time() - cached.get("sessionAt", 0) < 86400:
+        api_url, _ = validate_jmap_https_url(cached["apiUrl"], trusted_origin)
+        session.update(api_url=api_url, account_id=cached["accountId"], using=cached["using"])
+        return session
 
     req = urllib.request.Request(session_url, headers=headers, method="GET")
     with open_trusted_jmap(opener, req, trusted_origin, timeout=12) as resp:
@@ -2458,7 +2407,7 @@ def jmap_write_session(cal_info):
 
     api_url = session_data.get("apiUrl")
     if not api_url:
-        raise ValueError("No apiUrl in JMAP session response")
+        raise ValueError("no apiUrl in JMAP session response")
     api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
 
     accounts = session_data.get("accounts", {})
@@ -2473,21 +2422,31 @@ def jmap_write_session(cal_info):
     if not account_id and accounts:
         account_id = next(iter(accounts.keys()))
     if not account_id:
-        raise ValueError("No JMAP calendar account found")
+        raise ValueError("no JMAP calendar account found")
 
     jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
     for cap in session_data.get("capabilities", {}):
         if "calendar" in cap.lower() and cap not in jmap_using:
             jmap_using.append(cap)
 
-    return {
-        "opener": opener,
-        "headers": headers,
-        "origin": trusted_origin,
-        "api_url": api_url,
-        "account_id": account_id,
-        "using": jmap_using,
-    }
+    if cached is not None:
+        cached.clear()
+        cached.update(apiUrl=api_url, accountId=account_id, using=jmap_using, sessionAt=time.time())
+    session.update(api_url=api_url, account_id=account_id, using=jmap_using)
+    return session
+
+
+def jmap_session_url(cal_info):
+    """The entry's JMAP session URL; a bare host means its /.well-known/jmap."""
+    session_url = (cal_info.get("jmapUrl") or cal_info.get("sessionUrl") or cal_info.get("url") or "").strip()
+    if not session_url:
+        session_url = "https://api.fastmail.com/jmap/session"
+    elif "://" not in session_url:
+        session_url = "https://" + session_url
+    parsed = urllib.parse.urlsplit(session_url)
+    if not parsed.path or parsed.path == "/":
+        session_url = urllib.parse.urlunsplit(parsed._replace(path="/.well-known/jmap"))
+    return session_url
 
 
 def jmap_event_set(session, call_id, **changes):
@@ -2559,7 +2518,7 @@ def jmap_event_fields(event_data):
 
 def create_jmap_event(cal_info, event_data):
     """Create an event on a JMAP server (RFC 8620, RFC 9670, RFC 8984 JSCalendar)."""
-    session = jmap_write_session(cal_info)
+    session = jmap_session(cal_info)
     jsevent = {"@type": "Event"}
     jsevent.update({k: v for k, v in jmap_event_fields(event_data).items() if v is not None})
 
@@ -2579,7 +2538,7 @@ def create_jmap_event(cal_info, event_data):
 
 def update_jmap_event(cal_info, event_id, event_data):
     """Replace the form-editable properties of a JMAP event (CalendarEvent/set update)."""
-    session = jmap_write_session(cal_info)
+    session = jmap_session(cal_info)
     event_id = str(event_id)
     result = jmap_event_set(session, "upd0", update={event_id: jmap_event_fields(event_data)})
     if event_id in result.get("notUpdated", {}):
@@ -2589,7 +2548,7 @@ def update_jmap_event(cal_info, event_id, event_data):
 
 def delete_jmap_event(cal_info, event_id):
     """Delete an event on a JMAP server using CalendarEvent/set destroy."""
-    session = jmap_write_session(cal_info)
+    session = jmap_session(cal_info)
     event_id = str(event_id)
     result = jmap_event_set(session, "del0", destroy=[event_id])
     if event_id in result.get("notDestroyed", {}):
@@ -3098,18 +3057,16 @@ def create_event(event_data):
     validate_event_times(event_data)
     cal_target = event_data.get("calendar") or event_data.get("calendarId") or "local"
     cal_info = find_calendar_config(cal_target)
-    cal_type = str(cal_info.get("type", "")).lower()
-
-    if cal_type == "local" or str(cal_target).lower() in ("local", "local calendar"):
-        res = create_local_event(cal_info, event_data)
-    elif cal_type == "jmap" or cal_info.get("jmapToken"):
-        res = create_jmap_event(cal_info, event_data)
-    elif cal_type == "caldav" or has_caldav_write(cal_info):
-        res = create_caldav_event(cal_info, event_data)
-    elif cal_info.get("googleCalendarId") or (cal_info.get("calendarId") and not cal_info.get("url")):
-        res = create_google_event(cal_info, event_data)
-    else:
+    kind = "local" if str(cal_target).lower() in ("local", "local calendar") else calendar_kind(cal_info)
+    creator = {
+        "local": create_local_event,
+        "jmap": create_jmap_event,
+        "caldav": create_caldav_event,
+        "google": create_google_event,
+    }.get(kind)
+    if creator is None:
         raise ValueError(f"Calendar '{cal_info.get('name')}' is a read-only subscription feed and does not accept push events.")
+    res = creator(cal_info, event_data)
 
     sync_all_events()
     return res
@@ -3126,16 +3083,7 @@ def resolve_event_target(data, action):
     cal_info = find_calendar_config(cal_target)
 
     if not cal_type:
-        cal_type = str(cal_info.get("type", "")).lower()
-        if not cal_type:
-            if cal_info.get("googleCalendarId"):
-                cal_type = "google"
-            elif cal_info.get("jmapToken"):
-                cal_type = "jmap"
-            elif has_caldav_write(cal_info):
-                cal_type = "caldav"
-            else:
-                cal_type = "local"
+        cal_type = calendar_kind(cal_info) or "local"
 
     if str(event_id).startswith("loc_") or str(event_id).startswith("local_"):
         cal_type = "local"
@@ -3187,7 +3135,7 @@ def get_writable_calendars():
     has_local = False
 
     for c in calendars:
-        c_type = str(c.get("type", "")).lower()
+        c_type = calendar_kind(c)
         if c_type == "local":
             has_local = True
             writables.append({
@@ -3197,7 +3145,7 @@ def get_writable_calendars():
                 "calendarId": "local",
                 "writable": True,
             })
-        elif c_type == "jmap" or c.get("jmapToken"):
+        elif c_type == "jmap":
             writables.append({
                 "name": c.get("name", "JMAP Calendar"),
                 "type": "jmap",
@@ -3205,7 +3153,7 @@ def get_writable_calendars():
                 "calendarId": c.get("jmapCalendarId") or c.get("calendarId") or "primary",
                 "writable": True,
             })
-        elif has_caldav_write(c):
+        elif c_type == "caldav":
             writables.append({
                 "name": c.get("name", "CalDAV Calendar"),
                 "type": "caldav",
@@ -3213,7 +3161,7 @@ def get_writable_calendars():
                 "calendarId": c.get("caldavUrl", ""),
                 "writable": True,
             })
-        elif c.get("googleCalendarId") or (c.get("calendarId") and not c.get("url")):
+        elif c_type == "google":
             writables.append({
                 "name": c.get("name", "Google Calendar"),
                 "type": "google",
@@ -3248,15 +3196,7 @@ def sync_all_events():
 
     enabled_cals = [
         c for c in calendars
-        if isinstance(c, dict) and c.get("enabled", True) and (
-            c.get("url") or
-            has_caldav_write(c) or
-            c.get("googleCalendarId") or
-            c.get("calendarId") or
-            c.get("jmapToken") or
-            str(c.get("type", "")).lower() == "jmap" or
-            str(c.get("type", "")).lower() == "local"
-        )
+        if isinstance(c, dict) and c.get("enabled", True) and calendar_kind(c)
     ]
 
     has_local = any(str(c.get("type", "")).lower() == "local" for c in enabled_cals)

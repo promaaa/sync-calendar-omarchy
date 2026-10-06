@@ -163,6 +163,25 @@ class FeedCredentialTests(unittest.TestCase):
         self.assertIsNone(redirected.get_header("Authorization"))
 
 
+class CalendarKindTests(unittest.TestCase):
+    def test_each_entry_shape_has_one_backend(self):
+        cases = [
+            ({"type": "local"}, "local"),
+            ({"type": "jmap", "jmapToken": "t", "calendarId": "c1"}, "jmap"),
+            ({"jmapToken": ""}, "jmap"),
+            ({"googleCalendarId": "x@group.calendar.google.com"}, "google"),
+            ({"calendarId": "primary"}, "google"),
+            ({"caldavUrl": "https://h/c/", "username": "u", "password": "p"}, "caldav"),
+            ({"url": "https://h/feed.ics", "caldavUrl": "https://h/c/", "username": "u", "password": "p"}, "caldav"),
+            ({"url": "https://h/feed.ics"}, "ics"),
+            ({"url": "https://h/feed.ics", "calendarId": "x"}, "ics"),
+            ({"name": "nothing"}, None),
+        ]
+        for entry, kind in cases:
+            with self.subTest(entry=entry):
+                self.assertEqual(fetch_events.calendar_kind(entry), kind)
+
+
 class EventFormValidationTests(unittest.TestCase):
     def test_end_before_start_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "after the start"):

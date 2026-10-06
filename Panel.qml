@@ -64,10 +64,17 @@ Panel {
   // ---- Calendar Filtering & Agenda Markdown Copy
   property string activeCalendarFilter: "all"
   readonly property var activeCalendars: eventsData.calendars || []
+  // "day": the selected day. "upcoming": the next 7 days from today.
+  property string agendaMode: "day"
+  // The event card opened to show its details (calendar/id/day), or "".
+  property string expandedEventKey: ""
+  onSelectedDateKeyChanged: agendaMode = "day"
   readonly property var displayedEvents: {
+    var filter = root.activeCalendarFilter
+    var keep = (filter === "all" || !filter) ? null : function(e) { return e.calendar === filter }
+    if (root.agendaMode === "upcoming") return Model.upcomingEvents(root.eventsByDate, root.todayKey, 7, keep)
     var list = root.selectedEvents || []
-    if (root.activeCalendarFilter === "all" || !root.activeCalendarFilter) return list
-    return list.filter(function(e) { return e.calendar === root.activeCalendarFilter })
+    return keep ? list.filter(keep) : list
   }
   property bool agendaCopied: false
 
@@ -126,6 +133,40 @@ Panel {
       root.eventCalendar = "Local Calendar"
     }
     root.addingEvent = true
+  }
+
+  // Quick add: "Lunch tomorrow 1pm-2pm" in the title field fills the date
+  // and time fields and keeps "Lunch" as the title. Nothing is saved yet.
+  function applyQuickAdd() {
+    var q = Model.parseQuickAdd(root.eventTitle, root.todayKey)
+    if (!q.date && !q.start) return
+    root.eventTitle = q.title
+    if (q.date) root.eventDate = q.date
+    if (q.start) {
+      root.eventAllDay = false
+      root.eventStartTime = q.start
+      root.eventEndTime = q.end
+    }
+  }
+
+  // IPC: open the form already filled from a quick-add sentence.
+  function quickAdd(text) {
+    if (!root.opened) root.open()
+    root.openAddEvent(root.todayKey)
+    root.eventTitle = String(text || "")
+    root.applyQuickAdd()
+  }
+
+  // IPC: "14:30 Standup" for the next timed event today or tomorrow, or "".
+  function nextEventSummary() {
+    var now = Date.now()
+    var list = Model.upcomingEvents(root.eventsByDate, root.todayKey, 2)
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i]
+      if (!e.allDay && e.startIso && new Date(e.startIso).getTime() >= now)
+        return root.eventTimeRange(e, "–") + " " + e.title
+    }
+    return ""
   }
 
   function openEditEvent(evt) {
@@ -287,6 +328,11 @@ Panel {
 
   function calendarList() {
     return JSON.parse(JSON.stringify(root.pendingCalendars || root.configuredCalendars))
+  }
+
+  function toggleAgendaMode() {
+    root.agendaMode = root.agendaMode === "upcoming" ? "day" : "upcoming"
+    root.expandedEventKey = ""
   }
 
   function openSettings(tab) {
@@ -857,6 +903,7 @@ Panel {
         else if (t === "t" || t === "T") root.goToToday()
         else if (t === "w" || t === "W") root.toggleWeekStart()
         else if (t === "y" || t === "Y") root.copyAgendaMarkdown()
+        else if (t === "u" || t === "U") root.toggleAgendaMode()
         else if (t === "n" || t === "N") root.openAddEvent(root.selectedDateKey)
         else if (t === "r" || t === "R") root.syncCalendars(true)
         else if (t === "?") root.toggleShortcutsHelp()
@@ -1455,7 +1502,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
-                  text: root.selectedDateLabel
+                  text: root.agendaMode === "upcoming" ? "NEXT 7 DAYS" : root.selectedDateLabel
                   color: root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1464,7 +1511,7 @@ Panel {
                 }
 
                 Rectangle {
-                  visible: root.selectedEvents.length > 0
+                  visible: root.displayedEvents.length > 0
                   anchors.verticalCenter: parent.verticalCenter
                   width: eventCountText.implicitWidth + Style.space(10)
                   height: Style.space(16)
@@ -1475,7 +1522,7 @@ Panel {
                     textFormat: Text.PlainText
                     id: eventCountText
                     anchors.centerIn: parent
-                    text: (root.activeCalendarFilter !== "all" && root.activeCalendarFilter)
+                    text: (root.agendaMode === "day" && root.activeCalendarFilter !== "all" && root.activeCalendarFilter)
                       ? (root.displayedEvents.length + "/" + root.selectedEvents.length)
                       : root.displayedEvents.length
                     color: Style.selectedStateColor(root.contentForeground, Color.accent)
@@ -1490,6 +1537,15 @@ Panel {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.space(4)
+
+                ChoicePill {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "7 days"
+                  selected: root.agendaMode === "upcoming"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  onClicked: root.toggleAgendaMode()
+                }
 
                 PanelActionButton {
                   id: addEventBtn
@@ -1776,6 +1832,7 @@ Panel {
                       model: [
                         { key: "n · Enter", desc: "New event on date" },
                         { key: "y", desc: "Copy agenda (Markdown)" },
+                        { key: "u", desc: "Day / next 7 days" },
                         { key: "r", desc: "Sync / refresh calendars" },
                         { key: "w", desc: "Toggle Mon / Sun start" },
                         { key: "?", desc: "Toggle this help" },
@@ -1875,11 +1932,13 @@ Panel {
                 TextField {
                   id: eventTitleInput
                   width: parent.width
-                  placeholderText: "Event Title (e.g. Team Standup, Doctor Appointment)"
+                  placeholderText: "Title, or a sentence: Lunch tomorrow 1pm-2pm"
                   text: root.eventTitle
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
                   onTextChanged: root.eventTitle = text
+                  // Enter or leaving the field reads dates and times out of it.
+                  onEditingFinished: root.applyQuickAdd()
                 }
 
                 // Date Input
@@ -2278,12 +2337,40 @@ Panel {
               Repeater {
                 model: root.displayedEvents
 
-                Rectangle {
+                Column {
                   required property var modelData
                   width: agendaSection.width
+                  spacing: Style.space(4)
+
+                  // Day title in the "next 7 days" list.
+                  Text {
+                    visible: Boolean(modelData.dayHeading)
+                    topPadding: Style.space(4)
+                    textFormat: Text.PlainText
+                    text: visible ? Model.formatSelectedDateLabel(modelData.dayHeading, root.todayKey, Qt.locale()) : ""
+                    color: Qt.darker(root.contentForeground, 1.4)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1
+                  }
+
+                Rectangle {
+                  id: eventCard
+                  readonly property string eventKey: modelData.calendar + "/" + modelData.id + "/" + (modelData.dayKey || root.selectedDateKey)
+                  readonly property bool expanded: root.expandedEventKey === eventKey
+                  width: parent.width
                   height: eventContentCol.implicitHeight + Style.space(12)
                   radius: Style.cornerRadius
                   color: Style.hoverFillFor(root.contentForeground, Color.accent)
+
+                  // A click on the card shows or hides its details. Declared
+                  // first, so the buttons and links above it still get clicks.
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.expandedEventKey = eventCard.expanded ? "" : eventCard.eventKey
+                  }
 
                   // Calendar color accent strip
                   Rectangle {
@@ -2373,6 +2460,20 @@ Panel {
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.body
                       font.bold: true
+                      elide: eventCard.expanded ? Text.ElideNone : Text.ElideRight
+                      wrapMode: eventCard.expanded ? Text.Wrap : Text.NoWrap
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      visible: eventCard.expanded
+                      text: modelData.description || (modelData.editable ? "No description." : "No description. This event is read-only here.")
+                      color: Qt.darker(root.contentForeground, 1.3)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.Wrap
+                      maximumLineCount: 12
                       elide: Text.ElideRight
                     }
 
@@ -2472,6 +2573,7 @@ Panel {
                       }
                     }
                   }
+                }
                 }
               }
             }

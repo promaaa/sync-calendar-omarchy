@@ -638,6 +638,127 @@ function dueNotifications(events, nowMs, noticeSetting, sentKeys, timeRange) {
   return due
 }
 
+// The events of `days` days from `fromKey`, in date order, as one flat list.
+// Each event gets `dayKey`; the first kept event of a day also gets
+// `dayHeading` (the same key), so the list can show a title per day.
+// `keep(evt)` (optional) filters before the headings are placed.
+function upcomingEvents(eventsByDate, fromKey, days, keep) {
+  var out = []
+  for (var i = 0; i < days; i++) {
+    var key = stepDate(fromKey, i).dateKey
+    var list = ((eventsByDate && eventsByDate[key]) || []).filter(function(e) { return !keep || keep(e) })
+    for (var j = 0; j < list.length; j++) {
+      var evt = Object.assign({}, list[j], { dayKey: key })
+      if (j === 0) evt.dayHeading = key
+      out.push(evt)
+    }
+  }
+  return out
+}
+
+// Quick add: "Lunch tomorrow 1pm", "Standup mon 9:30-9:45", "Dentiste
+// demain 14h", "Call friday at 3pm for 30m", "Review 2026-10-12".
+// Returns { title, date, start, end }: date "YYYY-MM-DD" or "", times
+// "HH:MM" or "". Words it does not understand stay in the title.
+var QUICK_DAY_OFFSETS = {
+  "today": 0, "tonight": 0, "aujourd'hui": 0, "ce soir": 0,
+  "tomorrow": 1, "tmrw": 1, "demain": 1, "après-demain": 2, "apres-demain": 2
+}
+// Full names only: "Sam" or "sun" in a title must not move the event.
+var QUICK_WEEKDAYS = {
+  "sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3, "thursday": 4, "friday": 5, "saturday": 6,
+  "dimanche": 0, "lundi": 1, "mardi": 2, "mercredi": 3, "jeudi": 4, "vendredi": 5, "samedi": 6
+}
+var QUICK_TIME = "(\\d{1,2}(?:[:.h]\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.|h)?)"
+
+function quickTime(token, meridiemHint) {
+  var t = String(token || "").toLowerCase().replace(/\s+/g, "").replace(/\./g, function(m, i, str) {
+    return /\d/.test(str.charAt(i - 1)) && /\d/.test(str.charAt(i + 1)) ? ":" : ""
+  })
+  t = t.replace(/h(\d{2})$/, ":$1").replace(/h$/, "")
+  if (meridiemHint && !/[ap]m?$/.test(t)) t += meridiemHint
+  return parseTimeInput(t)
+}
+
+function hasTimeMarker(token) {
+  return /[:.h]|am|pm|a\.m|p\.m/i.test(String(token || ""))
+}
+
+function addMinutes(hhmm, minutes) {
+  var parts = hhmm.split(":")
+  var total = (parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + minutes) % 1440
+  return pad2(Math.floor(total / 60)) + ":" + pad2(total % 60)
+}
+
+function parseQuickAdd(text, todayKey) {
+  var rest = " " + String(text || "").replace(/\s+/g, " ").trim() + " "
+  var result = { title: "", date: "", start: "", end: "" }
+  function take(re, fn) {
+    var m = re.exec(rest)
+    if (m && fn(m) !== false) rest = rest.slice(0, m.index) + " " + rest.slice(m.index + m[0].length)
+  }
+  var today = parseDateInput(todayKey) || dateKey(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())
+  var todayDow = new Date(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10))).getUTCDay()
+
+  // Times: a range first ("1-2pm", "9:30-10:15", "13h-14h30"), then one time.
+  take(new RegExp("\\s(?:at |à |@ ?)?" + QUICK_TIME + "\\s*(?:-|–|to|à)\\s*" + QUICK_TIME + "(?=\\s)", "i"), function(m) {
+    if (!hasTimeMarker(m[1]) && !hasTimeMarker(m[2])) return false
+    var hint = (/(am|pm)\s*$/i.exec(m[2]) || [])[1]
+    var start = quickTime(m[1], hint && !/(am|pm)/i.test(m[1]) ? hint.toLowerCase() : "")
+    var end = quickTime(m[2])
+    if (!start || !end) return false
+    result.start = start
+    result.end = end
+  })
+  if (!result.start) {
+    take(new RegExp("\\s(?:(at |à |@ ?)" + QUICK_TIME + "|" + QUICK_TIME + ")(?=\\s)", "i"), function(m) {
+      var token = m[2] || m[3]
+      if (!m[1] && !hasTimeMarker(token)) return false
+      var start = quickTime(token)
+      if (!start) return false
+      result.start = start
+    })
+  }
+  if (result.start && !result.end) {
+    var minutes = 60
+    take(/\s(?:for|pendant) (\d+(?:[.,]\d+)?) ?(h|hours?|hrs?|heures?|m|mins?|minutes?)(?=\s)/i, function(m) {
+      var n = parseFloat(m[1].replace(",", "."))
+      minutes = Math.round(/^h/i.test(m[2]) ? n * 60 : n)
+    })
+    result.end = addMinutes(result.start, Math.max(1, minutes))
+    // The form edits one day: an event late in the evening ends at midnight.
+    if (result.end <= result.start) result.end = "23:59"
+  }
+
+  // Dates.
+  take(/\s(\d{4}-\d{1,2}-\d{1,2})(?=\s)/, function(m) {
+    var d = parseDateInput(m[1])
+    if (!d) return false
+    result.date = d
+  })
+  if (!result.date) {
+    take(/\s(?:in|dans) (\d{1,3}) (?:days?|jours?)(?=\s)/i, function(m) {
+      result.date = stepDate(today, parseInt(m[1], 10)).dateKey
+    })
+  }
+  if (!result.date) {
+    var dayWords = Object.keys(QUICK_DAY_OFFSETS).sort(function(a, b) { return b.length - a.length })
+    take(new RegExp("\\s(" + dayWords.join("|") + ")(?=\\s)", "i"), function(m) {
+      result.date = stepDate(today, QUICK_DAY_OFFSETS[m[1].toLowerCase()]).dateKey
+    })
+  }
+  if (!result.date) {
+    take(new RegExp("\\s(?:(next|prochain) |on |le )?(" + Object.keys(QUICK_WEEKDAYS).join("|") + ")( prochain)?(?=\\s)", "i"), function(m) {
+      var ahead = (QUICK_WEEKDAYS[m[2].toLowerCase()] - todayDow + 7) % 7
+      if (ahead === 0 && (m[1] || m[3])) ahead = 7
+      result.date = stepDate(today, ahead).dateKey
+    })
+  }
+
+  result.title = rest.replace(/\s(?:at|à|on|le)\s*$/i, " ").replace(/\s+/g, " ").trim()
+  return result
+}
+
 function calculateEndTime(startTimeStr, durationMinutes) {
   var start = parseTimeInput(startTimeStr)
   if (!start) return "10:00"
@@ -687,6 +808,8 @@ if (typeof module !== "undefined") {
     parseTimeInput: parseTimeInput,
     notificationStage: notificationStage,
     dueNotifications: dueNotifications,
+    upcomingEvents: upcomingEvents,
+    parseQuickAdd: parseQuickAdd,
     parseDateInput: parseDateInput,
     calculateEndTime: calculateEndTime,
     stepDate: stepDate,

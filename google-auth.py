@@ -4,13 +4,13 @@ Google Calendar OAuth2 Authorization Helper for Omarchy Calendar Plugin.
 Acquires and stores a refresh token for accessing private/shared Google Calendars via the API.
 """
 
+import importlib.util
 import os
 import sys
 import json
 from html import escape as html_escape
 import time
 import secrets
-import stat
 import webbrowser
 import urllib.request
 import urllib.parse
@@ -31,140 +31,19 @@ auth_failed = False
 expected_state = None
 
 
-def safe_read_bytes(stream, max_bytes=MAX_API_BYTES):
-    """
-    Reads binary content from stream up to max_bytes + 1.
-    Raises ValueError if content exceeds max_bytes to prevent unbounded memory consumption.
-    """
-    chunks = []
-    total = 0
-    chunk_size = 64 * 1024
-    while total <= max_bytes:
-        chunk = stream.read(min(chunk_size, max_bytes - total + 1))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > max_bytes:
-            raise ValueError(f"Content size exceeded safety limit of {max_bytes} bytes")
-    return b"".join(chunks)
+def _load_backend():
+    """fetch-events.py holds the safe file helpers and the keyring code."""
+    spec = importlib.util.spec_from_file_location(
+        "chronica_backend", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fetch-events.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def safe_read_text(stream, max_bytes=MAX_CONFIG_BYTES):
-    """
-    Reads text content from stream up to max_bytes + 1 chars.
-    Raises ValueError if content exceeds max_bytes to prevent unbounded memory consumption.
-    """
-    chunks = []
-    total = 0
-    chunk_size = 64 * 1024
-    while total <= max_bytes:
-        chunk = stream.read(min(chunk_size, max_bytes - total + 1))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > max_bytes:
-            raise ValueError(f"Content size exceeded safety limit of {max_bytes} characters")
-    return "".join(chunks)
-
-
-def safe_load_json(file_path, max_bytes=MAX_CONFIG_BYTES):
-    """
-    Read JSON from one descriptor, rejecting links, non-files, foreign owners,
-    and files larger than the configured limit.
-    """
-    dir_name = os.path.dirname(os.path.realpath(file_path))
-    file_name = os.path.basename(file_path)
-    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        dir_fd = os.open(dir_name, dir_flags)
-    except FileNotFoundError:
-        return None
-    try:
-        dir_stat = os.fstat(dir_fd)
-        if not stat.S_ISDIR(dir_stat.st_mode) or dir_stat.st_uid != os.getuid():
-            raise PermissionError(f"Unsafe JSON directory: {dir_name}")
-        try:
-            fd = os.open(file_name, file_flags, dir_fd=dir_fd)
-        except FileNotFoundError:
-            return None
-        try:
-            file_stat = os.fstat(fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise ValueError(f"JSON path is not a regular file: {file_path}")
-            if file_stat.st_uid != os.getuid():
-                raise PermissionError(f"JSON file is not owned by the current user: {file_path}")
-            if file_stat.st_size > max_bytes:
-                raise ValueError(f"JSON file exceeds safety limit of {max_bytes} bytes")
-            with os.fdopen(fd, "rb", closefd=False) as f:
-                raw = safe_read_bytes(f, max_bytes=max_bytes)
-            return json.loads(raw.decode("utf-8"))
-        finally:
-            os.close(fd)
-    finally:
-        os.close(dir_fd)
-
-
-def write_secure_json(path, data, mode=0o600, max_bytes=MAX_CONFIG_BYTES):
-    """Atomically replace an owned regular JSON file through its directory fd."""
-    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    if len(payload) > max_bytes:
-        raise ValueError(f"JSON output exceeds safety limit of {max_bytes} bytes")
-    dir_name = os.path.dirname(os.path.realpath(path))
-    file_name = os.path.basename(path)
-    os.makedirs(dir_name, mode=0o700, exist_ok=True)
-    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    dir_fd = os.open(dir_name, dir_flags)
-    tmp_name = None
-    try:
-        dir_stat = os.fstat(dir_fd)
-        if not stat.S_ISDIR(dir_stat.st_mode) or dir_stat.st_uid != os.getuid():
-            raise PermissionError(f"Unsafe JSON directory: {dir_name}")
-        try:
-            existing = os.stat(file_name, dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None:
-            if not stat.S_ISREG(existing.st_mode):
-                raise ValueError(f"JSON path is not a regular file: {path}")
-            if existing.st_uid != os.getuid():
-                raise PermissionError(f"JSON file is not owned by the current user: {path}")
-
-        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        for _ in range(128):
-            candidate = f".{file_name}.tmp-{secrets.token_hex(16)}"
-            try:
-                fd = os.open(candidate, create_flags, mode, dir_fd=dir_fd)
-                tmp_name = candidate
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise FileExistsError("Unable to allocate an exclusive JSON temporary file")
-        try:
-            tmp_stat = os.fstat(fd)
-            if not stat.S_ISREG(tmp_stat.st_mode) or tmp_stat.st_uid != os.getuid():
-                raise PermissionError("Unsafe JSON temporary file")
-            os.fchmod(fd, mode)
-            view = memoryview(payload)
-            while view:
-                written = os.write(fd, view)
-                view = view[written:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp_name, file_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        tmp_name = None
-        os.fsync(dir_fd)
-    finally:
-        if tmp_name is not None:
-            try:
-                os.unlink(tmp_name, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-        os.close(dir_fd)
+backend = _load_backend()
+safe_read_bytes = backend.safe_read_bytes
+safe_load_json = backend.safe_load_json
+write_secure_json = backend.write_secure_json
 
 
 class OAuthCallbackHandler(BaseHTTPRequestHandler):
@@ -251,7 +130,8 @@ def main():
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
-    existing_auth = safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES) or {}
+    existing_auth = backend.reveal_secrets(safe_load_json(AUTH_FILE, max_bytes=MAX_CONFIG_BYTES) or {},
+                                           backend.GOOGLE_SECRET_FIELDS, secret_id="google")
     client_id = client_id or existing_auth.get("client_id", "")
     client_secret = client_secret or existing_auth.get("client_secret", "")
 
@@ -346,6 +226,7 @@ def main():
             "updated_at": int(time.time()),
         }
 
+        backend.stash_secrets(auth_data, backend.GOOGLE_SECRET_FIELDS, secret_id="google")
         write_secure_json(AUTH_FILE, auth_data, mode=0o600)
 
         print("\n" + "=" * 60)

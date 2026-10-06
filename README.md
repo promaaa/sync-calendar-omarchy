@@ -161,6 +161,23 @@ Configure your calendar feeds and preferences using the in-app **Settings Menu (
 
 Edits to `calendars.json` hot-reload automatically without restarting the shell.
 
+### Passwords and tokens
+
+When a desktop keyring runs (GNOME Keyring or KWallet, through `secret-tool`
+from libsecret), the plugin moves every `password` and `jmapToken` into it,
+and also the Google `refresh_token` and `client_secret`. The JSON files then
+hold `"@keyring"` in their place. Without a keyring, the secrets stay in the
+files, which the plugin writes with mode 0600. `--purge-data` also clears
+the keyring items.
+
+A password is only sent over `https://`, and never to the host of a redirect.
+
+### Translation option
+
+An entry with `"translateKorean": true` sends the title and location of its
+Korean events to Google Translate (`translate.googleapis.com`) and shows the
+English result. It is off by default. Leave it off for a private calendar.
+
 ## Getting Calendar Links
 
 ### Google Calendar (Private iCal)

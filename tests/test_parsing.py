@@ -11,8 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("fetch_events", ROOT / "fetch-events.py")
 fetch_events = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fetch_events)
-# Keep the sync cache out of the real ~/.local/state.
+# Keep the sync cache out of the real ~/.local/state, and the keyring off:
+# a test must never write to the desktop keyring.
 fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
+fetch_events._secret_tool = lambda args, value=None: None
 
 WINDOW = (datetime(2026, 9, 1), datetime(2026, 9, 30))
 
@@ -139,6 +141,26 @@ class ConditionalSyncTests(unittest.TestCase):
         self.assertEqual(sent, ["session", "CalendarEvent/query", "CalendarEvent/changes"])
         self.assertEqual([e["title"] for e in first["events"]], ["Review"])
         self.assertEqual([e["title"] for e in second["events"]], ["Review"])
+
+
+class FeedCredentialTests(unittest.TestCase):
+    CAL = {"name": "Private", "url": "https://example.com/cal.ics", "username": "u", "password": "p"}
+
+    def test_password_is_not_sent_over_plain_http(self):
+        cal = dict(self.CAL, url="http://example.com/cal.ics")
+        with mock.patch.object(fetch_events.urllib.request, "urlopen") as urlopen:
+            result = fetch_events.fetch_calendar(cal, *WINDOW)
+        urlopen.assert_not_called()
+        self.assertIn("plain http", result["status"])
+
+    def test_password_does_not_follow_a_redirect(self):
+        with mock.patch.object(fetch_events.urllib.request, "urlopen", return_value=_Resp("")) as urlopen:
+            fetch_events.fetch_calendar(self.CAL, *WINDOW)
+        req = urlopen.call_args[0][0]
+        self.assertTrue(req.get_header("Authorization"))
+        redirected = fetch_events.urllib.request.HTTPRedirectHandler().redirect_request(
+            req, None, 302, "Found", {}, "https://elsewhere.example.net/cal.ics")
+        self.assertIsNone(redirected.get_header("Authorization"))
 
 
 class EventFormValidationTests(unittest.TestCase):

@@ -1078,6 +1078,8 @@ def parse_ics(content, cal_info, window_start, window_end):
             "meetingUrl": meeting_url or "",
             "meetingProvider": meeting_provider or "",
             "rrule": raw.get("RRULE"),
+            # Overrides of one occurrence have no RRULE of their own.
+            "recurring": bool(raw.get("RRULE")) or "RECURRENCE-ID" in raw,
             "tz": raw.get("TZ"),
             "exdates": raw.get("exdates", []),
         }
@@ -1370,6 +1372,9 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
                 "location": location,
                 "description": description,
                 "calendar": cal_info.get("name", "Google Calendar"),
+                "calendarId": cal_id,
+                "calendarType": "google",
+                "writable": True,
                 "color": cal_info.get("color", "#4A90E2"),
                 "all_day": all_day,
                 "start_dt": start_dt,
@@ -1387,6 +1392,8 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
         return {
             "name": name,
             "color": cal_info.get("color", "#4A90E2"),
+            "type": "google",
+            "writable": True,
             "events": events,
             "status": "ok",
             "count": len(events),
@@ -1820,6 +1827,9 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
                 "location": location,
                 "description": description,
                 "calendar": name,
+                "calendarId": cal_info.get("jmapCalendarId") or cal_info.get("calendarId") or "",
+                "calendarType": "jmap",
+                "writable": True,
                 "color": color,
                 "all_day": all_day,
                 "start_dt": start_dt,
@@ -1828,6 +1838,10 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
                 "meetingUrl": meeting_url or "",
                 "meetingProvider": meeting_provider or "",
                 "rrule": None,
+                # expandRecurrences hands back occurrences marked by recurrenceId.
+                "recurring": any(item.get(k) for k in (
+                    "recurrenceId", "recurrenceRule", "recurrenceRules", "recurrenceOverrides"
+                )),
                 "exdates": [],
             }
 
@@ -1837,6 +1851,8 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
         return {
             "name": name,
             "color": color,
+            "type": "jmap",
+            "writable": True,
             "events": events,
             "status": "ok",
             "count": len(events),
@@ -1946,11 +1962,11 @@ def get_local_tz_name():
         return "UTC"
 
 
-def parse_iso_or_local(val_str):
-    """Parse an ISO 8601 or local timestamp string into datetime."""
-    if not val_str:
-        return datetime.now()
-    clean_str = str(val_str).strip()
+def parse_local_timestamp(val_str):
+    """Parse an ISO 8601 or local timestamp string into datetime, or None."""
+    clean_str = str(val_str or "").strip()
+    if not clean_str:
+        return None
     if clean_str.endswith("Z"):
         clean_str = clean_str[:-1]
     for fmt in (
@@ -1966,8 +1982,22 @@ def parse_iso_or_local(val_str):
             continue
     try:
         return datetime.fromisoformat(clean_str)
-    except Exception:
-        return datetime.now()
+    except ValueError:
+        return None
+
+
+def parse_iso_or_local(val_str):
+    """Parse a stored timestamp, falling back to now for unreadable values."""
+    dt = parse_local_timestamp(val_str)
+    return dt if dt is not None else datetime.now()
+
+
+def validate_event_times(event_data):
+    """Reject unreadable start/end values instead of silently booking "now"."""
+    for key in ("start", "end"):
+        raw = str(event_data.get(key) or "").strip()
+        if raw and parse_local_timestamp(raw) is None:
+            raise ValueError(f"Invalid event {key} '{raw}': use a time like 14:30 or 2:30pm")
 
 
 def fetch_local_calendar(cal_info, window_start, window_end):
@@ -2101,8 +2131,35 @@ def delete_local_event(cal_info, event_id):
     return {"status": "success", "id": event_id}
 
 
-def create_google_event(cal_info, event_data):
-    """Create an event on Google Calendar using Google Calendar API v3."""
+def update_local_event(cal_info, event_id, event_data):
+    """Rewrite the form fields of a local event in place, keeping its id."""
+    events = safe_load_json(LOCAL_EVENTS_PATH, max_bytes=MAX_OUTPUT_JSON_BYTES) or []
+    if not isinstance(events, list):
+        events = []
+
+    start_str = str(event_data.get("start", "")).strip()
+    if not start_str:
+        raise ValueError("Event must have a start date/time")
+
+    for evt in events:
+        if isinstance(evt, dict) and str(evt.get("id")) == str(event_id):
+            evt.update({
+                "title": str(event_data.get("title", "")).strip() or "(Untitled Event)",
+                "start": start_str,
+                "end": str(event_data.get("end", "")).strip(),
+                "allDay": bool(event_data.get("allDay", False)),
+                "location": str(event_data.get("location", "")).strip(),
+                "description": str(event_data.get("description", "")).strip(),
+                "updatedAt": int(time.time()),
+            })
+            write_secure_json(LOCAL_EVENTS_PATH, events, mode=0o600, max_bytes=MAX_OUTPUT_JSON_BYTES)
+            return {"status": "success", "id": event_id, "event": evt}
+
+    return {"status": "error", "message": f"Event '{event_id}' not found in local calendar"}
+
+
+def google_events_url(cal_info):
+    """Events collection URL of a configured Google calendar plus a fresh access token."""
     cal_id = cal_info.get("googleCalendarId") or cal_info.get("calendarId")
     if not cal_id:
         raise ValueError("Google calendar has no calendar ID configured")
@@ -2116,6 +2173,31 @@ def create_google_event(cal_info, event_data):
             raise ValueError(f"Google token refresh failed: {_LAST_GOOGLE_AUTH['detail']}")
         raise ValueError("Google authentication required: run google-auth.py")
 
+    encoded_cal_id = urllib.parse.quote(cal_id, safe="")
+    return f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events", access_token
+
+
+def google_request(method, url, access_token, body=None):
+    """One Google Calendar API call; returns the decoded JSON reply (or {})."""
+    headers = {"Authorization": f"Bearer {access_token}", "User-Agent": USER_AGENT}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+    return json.loads(raw.decode("utf-8")) if raw.strip() else {}
+
+
+def google_event_body(event_data, patch=False):
+    """
+    Google event resource for the panel's form fields.
+
+    A PATCH merges nested objects, so switching between timed and all-day has to
+    null out the other form of start/end, and emptied text fields are sent as ""
+    so they are cleared rather than left as they were.
+    """
     title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
     location = str(event_data.get("location", "")).strip()
     description = str(event_data.get("description", "")).strip()
@@ -2126,15 +2208,11 @@ def create_google_event(cal_info, event_data):
     if not start_val:
         raise ValueError("Event must have a start date/time")
 
-    body = {
-        "summary": title,
-    }
-    if description:
+    body = {"summary": title}
+    if description or patch:
         body["description"] = description
-    if location:
+    if location or patch:
         body["location"] = location
-
-    tz_name = get_local_tz_name()
 
     if all_day:
         d_start = start_val[:10]
@@ -2146,6 +2224,9 @@ def create_google_event(cal_info, event_data):
             end_date_str = d_start
         body["start"] = {"date": d_start}
         body["end"] = {"date": end_date_str}
+        if patch:
+            for key in ("start", "end"):
+                body[key].update({"dateTime": None, "timeZone": None})
     else:
         start_dt = parse_iso_or_local(start_val)
         if end_val:
@@ -2153,70 +2234,48 @@ def create_google_event(cal_info, event_data):
         else:
             end_dt = start_dt + timedelta(hours=1)
 
-        start_iso = start_dt.astimezone().isoformat()
-        end_iso = end_dt.astimezone().isoformat()
-
-        body["start"] = {"dateTime": start_iso}
-        body["end"] = {"dateTime": end_iso}
+        body["start"] = {"dateTime": start_dt.astimezone().isoformat()}
+        body["end"] = {"dateTime": end_dt.astimezone().isoformat()}
+        tz_name = get_local_tz_name()
         if tz_name:
             body["start"]["timeZone"] = tz_name
             body["end"]["timeZone"] = tz_name
+        if patch:
+            for key in ("start", "end"):
+                body[key]["date"] = None
+    return body
 
-    encoded_cal_id = urllib.parse.quote(cal_id, safe="")
-    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events"
-    req_data = json.dumps(body).encode("utf-8")
 
-    req = urllib.request.Request(
-        url,
-        data=req_data,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": USER_AGENT,
-            "Content-Type": "application/json",
-        },
-        method="POST"
-    )
+def create_google_event(cal_info, event_data):
+    """Create an event on Google Calendar using Google Calendar API v3."""
+    url, access_token = google_events_url(cal_info)
+    body = google_event_body(event_data)
+    created_data = google_request("POST", url, access_token, body)
+    return {"status": "success", "id": created_data.get("id"), "event": created_data}
 
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-        created_data = json.loads(raw.decode("utf-8"))
-        return {"status": "success", "id": created_data.get("id"), "event": created_data}
+
+def update_google_event(cal_info, event_id, event_data):
+    """
+    Patch an event on Google Calendar. Events are fetched with singleEvents, so
+    the id of a recurring occurrence changes that occurrence only.
+    """
+    url, access_token = google_events_url(cal_info)
+    body = google_event_body(event_data, patch=True)
+    encoded_evt_id = urllib.parse.quote(str(event_id), safe="")
+    updated = google_request("PATCH", f"{url}/{encoded_evt_id}", access_token, body)
+    return {"status": "success", "id": updated.get("id", event_id), "event": updated}
 
 
 def delete_google_event(cal_info, event_id):
     """Delete an event from Google Calendar API v3."""
-    cal_id = cal_info.get("googleCalendarId") or cal_info.get("calendarId")
-    if not cal_id:
-        raise ValueError("Google calendar has no calendar ID configured")
-
-    access_token = get_google_access_token()
-    if not access_token:
-        auth_state = _LAST_GOOGLE_AUTH["state"]
-        if auth_state == "revoked":
-            raise ValueError("Google login expired or revoked: reconnect Google in Settings")
-        if auth_state == "error":
-            raise ValueError(f"Google token refresh failed: {_LAST_GOOGLE_AUTH['detail']}")
-        raise ValueError("Google authentication required: run google-auth.py")
-
-    encoded_cal_id = urllib.parse.quote(cal_id, safe="")
+    url, access_token = google_events_url(cal_info)
     encoded_evt_id = urllib.parse.quote(str(event_id), safe="")
-    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events/{encoded_evt_id}"
-
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": USER_AGENT,
-        },
-        method="DELETE"
-    )
-
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return {"status": "success", "id": event_id}
+    google_request("DELETE", f"{url}/{encoded_evt_id}", access_token)
+    return {"status": "success", "id": event_id}
 
 
-def create_jmap_event(cal_info, event_data):
-    """Create an event on a JMAP server (RFC 8620, RFC 9670, RFC 8984 JSCalendar)."""
+def jmap_write_session(cal_info):
+    """Discover the JMAP API endpoint and calendar account used for writes."""
     token = (cal_info.get("jmapToken") or cal_info.get("token") or cal_info.get("bearerToken") or "").strip()
     session_url = (cal_info.get("jmapUrl") or cal_info.get("sessionUrl") or cal_info.get("url") or "").strip()
 
@@ -2241,7 +2300,6 @@ def create_jmap_event(cal_info, event_data):
         "Content-Type": "application/json",
     }
 
-    # Step 1: Session Discovery
     req = urllib.request.Request(session_url, headers=headers, method="GET")
     with open_trusted_jmap(opener, req, trusted_origin, timeout=12) as resp:
         raw_session = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
@@ -2255,20 +2313,65 @@ def create_jmap_event(cal_info, event_data):
     accounts = session_data.get("accounts", {})
     primary_accounts = session_data.get("primaryAccounts", {})
     account_id = primary_accounts.get("urn:ietf:params:jmap:calendars")
-
     if not account_id:
         for acc_id, acc_val in accounts.items():
             caps = acc_val.get("accountCapabilities", {})
             if any("calendar" in k.lower() for k in caps.keys()):
                 account_id = acc_id
                 break
-
     if not account_id and accounts:
         account_id = next(iter(accounts.keys()))
-
     if not account_id:
         raise ValueError("No JMAP calendar account found")
 
+    jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
+    for cap in session_data.get("capabilities", {}):
+        if "calendar" in cap.lower() and cap not in jmap_using:
+            jmap_using.append(cap)
+
+    return {
+        "opener": opener,
+        "headers": headers,
+        "origin": trusted_origin,
+        "api_url": api_url,
+        "account_id": account_id,
+        "using": jmap_using,
+    }
+
+
+def jmap_event_set(session, call_id, **changes):
+    """Run one CalendarEvent/set call; returns its response arguments."""
+    payload = {
+        "using": session["using"],
+        "methodCalls": [
+            ["CalendarEvent/set", dict(accountId=session["account_id"], **changes), call_id],
+        ],
+    }
+    post_req = urllib.request.Request(
+        session["api_url"], data=json.dumps(payload).encode("utf-8"),
+        headers=session["headers"], method="POST",
+    )
+    with open_trusted_jmap(session["opener"], post_req, session["origin"], timeout=15) as resp:
+        raw_data = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+        response_data = json.loads(raw_data.decode("utf-8"))
+
+    for resp_name, resp_args, _ in response_data.get("methodResponses", []):
+        if resp_name == "CalendarEvent/set":
+            return resp_args
+        if resp_name == "error":
+            raise ValueError(f"JMAP error: {resp_args.get('type')}")
+    return {}
+
+
+def jmap_set_error(entry):
+    return entry.get("description") or entry.get("type")
+
+
+def jmap_event_fields(event_data):
+    """
+    JSCalendar properties for the panel's form fields. None marks a property the
+    event must not have (a removed location, a time zone on an all-day event).
+    """
     title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
     location = str(event_data.get("location", "")).strip()
     description = str(event_data.get("description", "")).strip()
@@ -2279,21 +2382,17 @@ def create_jmap_event(cal_info, event_data):
     if not start_val:
         raise ValueError("Event must have a start date/time")
 
-    tz_name = get_local_tz_name()
-
-    jsevent = {
-        "@type": "Event",
+    fields = {
         "title": title,
         "description": description,
         "showWithoutTime": all_day,
+        "locations": {"loc1": {"@type": "Location", "name": location}} if location else None,
     }
-    if location:
-        jsevent["locations"] = {"loc1": {"@type": "Location", "name": location}}
 
     if all_day:
-        d_start = start_val[:10]
-        jsevent["start"] = d_start
-        jsevent["duration"] = "P1D"
+        fields["start"] = start_val[:10]
+        fields["duration"] = "P1D"
+        fields["timeZone"] = None
     else:
         start_dt = parse_iso_or_local(start_val)
         if end_val:
@@ -2301,154 +2400,49 @@ def create_jmap_event(cal_info, event_data):
         else:
             end_dt = start_dt + timedelta(hours=1)
         dur_seconds = max(60, int((end_dt - start_dt).total_seconds()))
-        dur_str = format_duration_iso(dur_seconds)
+        fields["start"] = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        fields["duration"] = format_duration_iso(dur_seconds)
+        fields["timeZone"] = get_local_tz_name() or None
+    return fields
 
-        jsevent["start"] = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-        if tz_name:
-            jsevent["timeZone"] = tz_name
-        jsevent["duration"] = dur_str
+
+def create_jmap_event(cal_info, event_data):
+    """Create an event on a JMAP server (RFC 8620, RFC 9670, RFC 8984 JSCalendar)."""
+    session = jmap_write_session(cal_info)
+    jsevent = {"@type": "Event"}
+    jsevent.update({k: v for k, v in jmap_event_fields(event_data).items() if v is not None})
 
     cal_id = cal_info.get("jmapCalendarId") or cal_info.get("calendarId")
     if cal_id and cal_id != "primary":
         jsevent["calendarIds"] = {cal_id: True}
 
-    jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
-    session_caps = session_data.get("capabilities", {})
-    for cap in session_caps:
-        if "calendar" in cap.lower() and cap not in jmap_using:
-            jmap_using.append(cap)
-
     creation_id = f"c_{secrets.token_hex(4)}"
-    payload = {
-        "using": jmap_using,
-        "methodCalls": [
-            [
-                "CalendarEvent/set",
-                {
-                    "accountId": account_id,
-                    "create": {
-                        creation_id: jsevent
-                    }
-                },
-                "set0"
-            ]
-        ]
-    }
-
-    payload_bytes = json.dumps(payload).encode("utf-8")
-    post_req = urllib.request.Request(api_url, data=payload_bytes, headers=headers, method="POST")
-
-    with open_trusted_jmap(opener, post_req, trusted_origin, timeout=15) as resp:
-        raw_data = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-        response_data = json.loads(raw_data.decode("utf-8"))
-
-    method_responses = response_data.get("methodResponses", [])
-    for resp_name, resp_args, resp_call_id in method_responses:
-        if resp_name == "CalendarEvent/set":
-            created_map = resp_args.get("created", {})
-            if creation_id in created_map:
-                created_evt = created_map[creation_id]
-                return {"status": "success", "id": created_evt.get("id"), "event": created_evt}
-            not_created = resp_args.get("notCreated", {})
-            if creation_id in not_created:
-                err_desc = not_created[creation_id].get("description") or not_created[creation_id].get("type")
-                raise ValueError(f"JMAP event creation rejected: {err_desc}")
-        elif resp_name == "error":
-            raise ValueError(f"JMAP error: {resp_args.get('type')}")
-
+    result = jmap_event_set(session, "set0", create={creation_id: jsevent})
+    if creation_id in result.get("created", {}):
+        created_evt = result["created"][creation_id]
+        return {"status": "success", "id": created_evt.get("id"), "event": created_evt}
+    if creation_id in result.get("notCreated", {}):
+        raise ValueError(f"JMAP event creation rejected: {jmap_set_error(result['notCreated'][creation_id])}")
     return {"status": "success", "id": creation_id}
+
+
+def update_jmap_event(cal_info, event_id, event_data):
+    """Replace the form-editable properties of a JMAP event (CalendarEvent/set update)."""
+    session = jmap_write_session(cal_info)
+    event_id = str(event_id)
+    result = jmap_event_set(session, "upd0", update={event_id: jmap_event_fields(event_data)})
+    if event_id in result.get("notUpdated", {}):
+        raise ValueError(f"JMAP event update rejected: {jmap_set_error(result['notUpdated'][event_id])}")
+    return {"status": "success", "id": event_id}
 
 
 def delete_jmap_event(cal_info, event_id):
     """Delete an event on a JMAP server using CalendarEvent/set destroy."""
-    token = (cal_info.get("jmapToken") or cal_info.get("token") or cal_info.get("bearerToken") or "").strip()
-    session_url = (cal_info.get("jmapUrl") or cal_info.get("sessionUrl") or cal_info.get("url") or "").strip()
-
-    if not session_url:
-        session_url = "https://api.fastmail.com/jmap/session"
-    elif "://" not in session_url:
-        session_url = "https://" + session_url
-
-    parsed = urllib.parse.urlsplit(session_url)
-    if not parsed.path or parsed.path == "/":
-        session_url = urllib.parse.urlunsplit(parsed._replace(path="/.well-known/jmap"))
-
-    if not token:
-        raise ValueError("No JMAP bearer token configured")
-
-    session_url, trusted_origin = validate_jmap_https_url(session_url)
-    opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(trusted_origin))
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    req = urllib.request.Request(session_url, headers=headers, method="GET")
-    with open_trusted_jmap(opener, req, trusted_origin, timeout=12) as resp:
-        raw_session = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-        session_data = json.loads(raw_session.decode("utf-8"))
-
-    api_url = session_data.get("apiUrl")
-    if not api_url:
-        raise ValueError("No apiUrl in JMAP session response")
-    api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
-
-    accounts = session_data.get("accounts", {})
-    primary_accounts = session_data.get("primaryAccounts", {})
-    account_id = primary_accounts.get("urn:ietf:params:jmap:calendars")
-    if not account_id:
-        for acc_id, acc_val in accounts.items():
-            caps = acc_val.get("accountCapabilities", {})
-            if any("calendar" in k.lower() for k in caps.keys()):
-                account_id = acc_id
-                break
-    if not account_id and accounts:
-        account_id = next(iter(accounts.keys()))
-    if not account_id:
-        raise ValueError("No JMAP calendar account found")
-
-    jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
-    session_caps = session_data.get("capabilities", {})
-    for cap in session_caps:
-        if "calendar" in cap.lower() and cap not in jmap_using:
-            jmap_using.append(cap)
-
-    payload = {
-        "using": jmap_using,
-        "methodCalls": [
-            [
-                "CalendarEvent/set",
-                {
-                    "accountId": account_id,
-                    "destroy": [str(event_id)]
-                },
-                "del0"
-            ]
-        ]
-    }
-
-    payload_bytes = json.dumps(payload).encode("utf-8")
-    post_req = urllib.request.Request(api_url, data=payload_bytes, headers=headers, method="POST")
-
-    with open_trusted_jmap(opener, post_req, trusted_origin, timeout=15) as resp:
-        raw_data = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-        response_data = json.loads(raw_data.decode("utf-8"))
-
-    method_responses = response_data.get("methodResponses", [])
-    for resp_name, resp_args, resp_call_id in method_responses:
-        if resp_name == "CalendarEvent/set":
-            destroyed = resp_args.get("destroyed", [])
-            if str(event_id) in [str(d) for d in destroyed]:
-                return {"status": "success", "id": event_id}
-            not_destroyed = resp_args.get("notDestroyed", {})
-            if str(event_id) in not_destroyed:
-                err_desc = not_destroyed[str(event_id)].get("description") or not_destroyed[str(event_id)].get("type")
-                raise ValueError(f"JMAP event deletion rejected: {err_desc}")
-        elif resp_name == "error":
-            raise ValueError(f"JMAP error: {resp_args.get('type')}")
-
+    session = jmap_write_session(cal_info)
+    event_id = str(event_id)
+    result = jmap_event_set(session, "del0", destroy=[event_id])
+    if event_id in result.get("notDestroyed", {}):
+        raise ValueError(f"JMAP event deletion rejected: {jmap_set_error(result['notDestroyed'][event_id])}")
     return {"status": "success", "id": event_id}
 
 
@@ -2511,7 +2505,7 @@ def caldav_credentials(cal_info):
 
 
 def caldav_request(origin, auth_header, method, url, body=None, headers=None):
-    """One authenticated CalDAV request, pinned to the account's own origin."""
+    """One authenticated CalDAV request, pinned to the account's own origin; returns (body, ETag)."""
     url, _ = validate_jmap_https_url(url, origin, label="CalDAV")
     data = body.encode("utf-8") if isinstance(body, str) else body
     req = urllib.request.Request(url, data=data, method=method)
@@ -2522,7 +2516,9 @@ def caldav_request(origin, auth_header, method, url, body=None, headers=None):
     opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(origin))
     with open_trusted_jmap(opener, req, origin, timeout=15) as resp:
         raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-        return getattr(resp, "status", 200), raw.decode("utf-8", errors="ignore")
+        resp_headers = getattr(resp, "headers", None)
+        etag = resp_headers.get("ETag") if resp_headers is not None else None
+        return raw.decode("utf-8", errors="ignore"), etag
 
 
 def caldav_error(exc, cal_info):
@@ -2573,8 +2569,8 @@ def ics_utc_stamp(dt):
     return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def build_vevent(event_data, uid):
-    """Serialize one event as a single-VEVENT iCalendar object."""
+def vevent_form_lines(event_data):
+    """The VEVENT properties the panel's form owns, in serialization order."""
     start = parse_iso_or_local(event_data.get("start"))
     end = parse_iso_or_local(event_data.get("end") or event_data.get("start"))
 
@@ -2596,12 +2592,6 @@ def build_vevent(event_data, uid):
 
     title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
     lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:" + CALDAV_PRODID,
-        "CALSCALE:GREGORIAN",
-        "BEGIN:VEVENT",
-        "UID:" + uid,
         "DTSTAMP:" + ics_utc_stamp(datetime.now(timezone.utc)),
         "SUMMARY:" + ics_escape(title),
     ]
@@ -2612,8 +2602,71 @@ def build_vevent(event_data, uid):
         lines.append("LOCATION:" + location)
     if description:
         lines.append("DESCRIPTION:" + description)
+    return lines
+
+
+def build_vevent(event_data, uid):
+    """Serialize one event as a single-VEVENT iCalendar object."""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:" + CALDAV_PRODID,
+        "CALSCALE:GREGORIAN",
+        "BEGIN:VEVENT",
+        "UID:" + uid,
+    ]
+    lines.extend(vevent_form_lines(event_data))
     lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return "\r\n".join(ics_fold(line) for line in lines) + "\r\n"
+
+
+# Properties an edit replaces. Everything else (UID, alarms, attendees,
+# categories, the organizer...) is carried over untouched. Apple's structured
+# location is derived from LOCATION, so it would go stale and is dropped.
+VEVENT_EDITED_PROPS = {
+    "DTSTAMP", "SUMMARY", "DTSTART", "DTEND", "DURATION", "LOCATION",
+    "DESCRIPTION", "SEQUENCE", "LAST-MODIFIED", "X-APPLE-STRUCTURED-LOCATION",
+}
+VEVENT_RECURRENCE_PROPS = {"RRULE", "RDATE", "EXDATE", "RECURRENCE-ID"}
+
+
+def ics_prop_name(line):
+    match = re.match(r"[A-Za-z0-9-]+", line)
+    return match.group(0).upper() if match else ""
+
+
+def rewrite_vevent(ics_text, event_data):
+    """Apply the form fields to an existing single-VEVENT calendar object."""
+    lines = unfold_lines(ics_text)
+    if sum(1 for line in lines if line.strip().upper() == "BEGIN:VEVENT") != 1:
+        raise ValueError("Recurring events with exceptions cannot be edited from the panel yet")
+
+    out = []
+    depth = 0  # 1 directly inside the VEVENT, deeper inside its VALARMs
+    sequence = 0
+    for line in lines:
+        upper = line.strip().upper()
+        if upper == "BEGIN:VEVENT" or (depth and upper.startswith("BEGIN:")):
+            depth += 1
+            out.append(line)
+            if depth == 1:
+                out.extend(vevent_form_lines(event_data))
+            continue
+        if depth and upper.startswith("END:"):
+            depth -= 1
+            if depth == 0:
+                out.append(f"SEQUENCE:{sequence + 1}")
+                out.append("LAST-MODIFIED:" + ics_utc_stamp(datetime.now(timezone.utc)))
+        elif depth == 1:
+            name = ics_prop_name(line)
+            if name in VEVENT_RECURRENCE_PROPS:
+                raise ValueError("Recurring events cannot be edited from the panel yet")
+            if name == "SEQUENCE":
+                sequence = safe_int_param(line.split(":", 1)[-1], 0)
+            if name in VEVENT_EDITED_PROPS:
+                continue
+        out.append(line)
+    return "\r\n".join(ics_fold(line) for line in out) + "\r\n"
 
 
 def create_caldav_event(cal_info, event_data):
@@ -2664,7 +2717,7 @@ def caldav_find_href(url, origin, auth, uid):
     """Locate an event whose resource is not named after its UID."""
     body = CALDAV_UID_QUERY.format(ns=CALDAV_NS, uid=xml_escape(str(uid)))
     try:
-        _, text = caldav_request(
+        text, _ = caldav_request(
             origin, auth, "REPORT", url, body,
             headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
         )
@@ -2702,12 +2755,44 @@ def delete_caldav_event(cal_info, event_id):
     return {"status": "success", "id": event_id}
 
 
+def update_caldav_event(cal_info, event_id, event_data):
+    """
+    Edit an event on a CalDAV collection: fetch its resource, replace the form
+    fields, and PUT it back guarded by the ETag so a change made meanwhile on
+    another device is reported instead of overwritten.
+    """
+    url, origin, auth = caldav_credentials(cal_info)
+    name = cal_info.get("name", "the CalDAV calendar")
+    href = url + urllib.parse.quote(str(event_id), safe="") + ".ics"
+    try:
+        try:
+            current, etag = caldav_request(origin, auth, "GET", href)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (404, 410):
+                raise
+            href = caldav_find_href(url, origin, auth, event_id)
+            if not href:
+                return {"status": "error", "message": f"Event '{event_id}' not found on {name}"}
+            current, etag = caldav_request(origin, auth, "GET", href)
+
+        headers = {"Content-Type": "text/calendar; charset=utf-8"}
+        if etag:
+            headers["If-Match"] = etag
+        caldav_request(origin, auth, "PUT", href, rewrite_vevent(current, event_data), headers=headers)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 412:
+            raise ValueError(f"{name}: the event was changed elsewhere meanwhile. Refresh and edit again.") from exc
+        raise ValueError(caldav_error(exc, cal_info)) from exc
+    return {"status": "success", "id": event_id}
+
+
+
 CALDAV_PROPFIND = """<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="{ns}"><d:prop>{props}</d:prop></d:propfind>"""
 
 
 def caldav_propfind(url, origin, auth, props, depth="0"):
-    _, text = caldav_request(
+    text, _ = caldav_request(
         origin, auth, "PROPFIND", url, CALDAV_PROPFIND.format(ns=CALDAV_NS, props=props),
         headers={"Content-Type": "application/xml; charset=utf-8", "Depth": depth},
     )
@@ -2783,6 +2868,7 @@ def find_calendar_config(cal_name_or_id):
 
 def create_event(event_data):
     """Dispatcher to create an event on the specified calendar."""
+    validate_event_times(event_data)
     cal_target = event_data.get("calendar") or event_data.get("calendarId") or "local"
     cal_info = find_calendar_config(cal_target)
     cal_type = str(cal_info.get("type", "")).lower()
@@ -2802,17 +2888,17 @@ def create_event(event_data):
     return res
 
 
-def delete_event(delete_data):
-    """Dispatcher to delete an event from the specified calendar."""
-    event_id = delete_data.get("id")
+def resolve_event_target(data, action):
+    """Event id, calendar entry and backend type for an edit or delete payload."""
+    event_id = data.get("id")
     if not event_id:
-        raise ValueError("Missing event ID for deletion")
+        raise ValueError(f"Missing event ID for {action}")
 
-    cal_target = delete_data.get("calendar") or delete_data.get("calendarId") or delete_data.get("calendarType") or "local"
-    cal_type = str(delete_data.get("calendarType", "")).lower()
+    cal_target = data.get("calendar") or data.get("calendarId") or data.get("calendarType") or "local"
+    cal_type = str(data.get("calendarType", "")).lower()
+    cal_info = find_calendar_config(cal_target)
 
     if not cal_type:
-        cal_info = find_calendar_config(cal_target)
         cal_type = str(cal_info.get("type", "")).lower()
         if not cal_type:
             if cal_info.get("googleCalendarId"):
@@ -2823,22 +2909,47 @@ def delete_event(delete_data):
                 cal_type = "caldav"
             else:
                 cal_type = "local"
-    else:
-        cal_info = find_calendar_config(cal_target)
 
-    if cal_type == "local" or str(event_id).startswith("loc_") or str(event_id).startswith("local_"):
-        res = delete_local_event(cal_info, event_id)
-    elif cal_type == "jmap":
-        res = delete_jmap_event(cal_info, event_id)
-    elif cal_type == "caldav":
-        res = delete_caldav_event(cal_info, event_id)
-    elif cal_type == "google":
-        res = delete_google_event(cal_info, event_id)
-    else:
-        raise ValueError(f"Calendar '{cal_target}' does not support event deletion (read-only feed).")
+    if str(event_id).startswith("loc_") or str(event_id).startswith("local_"):
+        cal_type = "local"
+    if cal_type not in ("local", "jmap", "caldav", "google"):
+        raise ValueError(f"Calendar '{cal_target}' does not support event {action} (read-only feed).")
+    return event_id, cal_info, cal_type
 
+
+def delete_event(delete_data):
+    """Dispatcher to delete an event from the specified calendar."""
+    event_id, cal_info, cal_type = resolve_event_target(delete_data, "deletion")
+    res = {
+        "local": delete_local_event,
+        "jmap": delete_jmap_event,
+        "caldav": delete_caldav_event,
+        "google": delete_google_event,
+    }[cal_type](cal_info, event_id)
     sync_all_events()
     return res
+
+
+def update_event(event_data):
+    """Dispatcher to edit an event on its own calendar (events never change calendar)."""
+    event_id, cal_info, cal_type = resolve_event_target(event_data, "editing")
+    validate_event_times(event_data)
+    res = {
+        "local": update_local_event,
+        "jmap": update_jmap_event,
+        "caldav": update_caldav_event,
+        "google": update_google_event,
+    }[cal_type](cal_info, event_id, event_data)
+    sync_all_events()
+    return res
+
+
+# CLI flags the panel pipes a JSON event payload into on stdin.
+EVENT_COMMANDS = {
+    "--create-event": create_event,
+    "--update-event": update_event,
+    "--delete-event": delete_event,
+}
 
 
 def get_writable_calendars():
@@ -2993,10 +3104,24 @@ def sync_all_events():
 
         if isinstance(end_dt, datetime):
             end_time_str = end_dt.strftime("%H:%M")
+            end_iso = end_dt.isoformat()
         else:
             end_time_str = "00:00"
+            end_iso = str(end_dt or "")
 
         is_all_day = bool(evt.get("all_day", False))
+        writable = bool(evt.get("writable", False))
+        # The form edits one day: a time range, or an all-day date. Longer spans
+        # and CalDAV/JMAP series would be rewritten wrongly, so they stay read-only.
+        editable = (
+            writable
+            and not (evt.get("rrule") or evt.get("recurring"))
+            and isinstance(start_dt, datetime) and isinstance(end_dt, datetime)
+            and (
+                (end_dt.date() - start_dt.date()).days <= 1 if is_all_day
+                else end_dt.date() == start_dt.date()
+            )
+        )
 
         events_by_date[d_key].append({
             "id": str(evt.get("id", "")),
@@ -3004,7 +3129,8 @@ def sync_all_events():
             "calendar": str(evt.get("calendar") or "Calendar"),
             "calendarId": str(evt.get("calendarId", "")),
             "calendarType": str(evt.get("calendarType", "ical")),
-            "writable": bool(evt.get("writable", False)),
+            "writable": writable,
+            "editable": editable,
             "description": str(evt.get("description") or ""),
             "color": str(evt.get("color") or "#4A90E2"),
             "allDay": is_all_day,
@@ -3012,6 +3138,7 @@ def sync_all_events():
             "endTime": end_time_str if not is_all_day else "",
             "location": str(evt.get("location") or ""),
             "startIso": start_iso,
+            "endIso": end_iso,
             "meetingUrl": str(evt.get("meetingUrl") or ""),
             "meetingProvider": str(evt.get("meetingProvider") or ""),
         })
@@ -3102,7 +3229,7 @@ def main():
             elif arg == "--auth-status":
                 print(json.dumps(google_auth_summary()))
                 sys.exit(0)
-            elif arg == "--create-event":
+            elif arg in EVENT_COMMANDS:
                 try:
                     raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
                     if len(raw_input) > MAX_CONFIG_BYTES:
@@ -3110,21 +3237,7 @@ def main():
                     event_data = json.loads(raw_input)
                     if not isinstance(event_data, dict):
                         raise ValueError("Payload must be a JSON object")
-                    res = create_event(event_data)
-                    print(json.dumps(res, ensure_ascii=False))
-                    sys.exit(0 if res.get("status") == "success" else 1)
-                except Exception as e:
-                    print(json.dumps({"status": "error", "message": str(e)}))
-                    sys.exit(1)
-            elif arg == "--delete-event":
-                try:
-                    raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
-                    if len(raw_input) > MAX_CONFIG_BYTES:
-                        raise ValueError(f"Payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
-                    delete_data = json.loads(raw_input)
-                    if not isinstance(delete_data, dict):
-                        raise ValueError("Payload must be a JSON object")
-                    res = delete_event(delete_data)
+                    res = EVENT_COMMANDS[arg](event_data)
                     print(json.dumps(res, ensure_ascii=False))
                     sys.exit(0 if res.get("status") == "success" else 1)
                 except Exception as e:

@@ -85,6 +85,8 @@ Panel {
   property string eventErrorMessage: ""
   property string pendingEventPayloadJson: ""
   property string pendingDeletePayloadJson: ""
+  // The rendered event being edited, or null while the form adds a new one.
+  property var editingEvent: null
   readonly property var writableCalendars: Model.getWritableCalendars(root.configuredCalendars)
 
   function toggleShortcutsHelp() {
@@ -100,10 +102,17 @@ Panel {
     root.showingShortcutsHelp = false
   }
 
-  function openAddEvent(dateKey) {
+  function resetEventFormChrome() {
     root.showingShortcutsHelp = false
     root.showingSettings = false
     root.addingCalendar = false
+    root.eventErrorMessage = ""
+    root.eventSubmitting = false
+  }
+
+  function openAddEvent(dateKey) {
+    root.resetEventFormChrome()
+    root.editingEvent = null
     root.eventTitle = ""
     root.eventDate = dateKey || root.selectedDateKey || root.todayKey
     root.eventStartTime = "09:00"
@@ -111,8 +120,6 @@ Panel {
     root.eventAllDay = false
     root.eventLocation = ""
     root.eventDescription = ""
-    root.eventErrorMessage = ""
-    root.eventSubmitting = false
     var writables = root.writableCalendars
     if (writables && writables.length > 0) {
       root.eventCalendar = writables[0].name
@@ -122,8 +129,24 @@ Panel {
     root.addingEvent = true
   }
 
+  function openEditEvent(evt) {
+    if (!evt || !evt.editable) return
+    root.resetEventFormChrome()
+    root.editingEvent = evt
+    root.eventTitle = evt.title || ""
+    root.eventCalendar = evt.calendar || "Local Calendar"
+    root.eventDate = String(evt.startIso || "").slice(0, 10) || root.selectedDateKey
+    root.eventAllDay = Boolean(evt.allDay)
+    root.eventStartTime = evt.allDay ? "09:00" : (evt.startTime || "09:00")
+    root.eventEndTime = evt.allDay ? "10:00" : (evt.endTime || "10:00")
+    root.eventLocation = evt.location || ""
+    root.eventDescription = evt.description || ""
+    root.addingEvent = true
+  }
+
   function closeAddEvent() {
     root.addingEvent = false
+    root.editingEvent = null
     root.eventSubmitting = false
     root.eventErrorMessage = ""
   }
@@ -132,16 +155,37 @@ Panel {
     root.eventEndTime = Model.calculateEndTime(root.eventStartTime, minutes)
   }
 
-  function submitNewEvent() {
+  function submitEvent() {
     if (!root.eventTitle.trim()) {
       root.eventErrorMessage = "Please enter an event title"
       return
     }
+
+    var date = Model.parseDateInput(root.eventDate)
+    if (!date) {
+      root.eventErrorMessage = "Enter the date as YYYY-MM-DD"
+      return
+    }
+    root.eventDate = date
+
+    var startTime = ""
+    var endTime = ""
+    if (!root.eventAllDay) {
+      startTime = Model.parseTimeInput(root.eventStartTime)
+      endTime = Model.parseTimeInput(root.eventEndTime)
+      if (!startTime || !endTime) {
+        root.eventErrorMessage = "Enter times like 14:30 or 2:30pm"
+        return
+      }
+      root.eventStartTime = startTime
+      root.eventEndTime = endTime
+    }
+
     root.eventSubmitting = true
     root.eventErrorMessage = ""
 
-    var startIso = root.eventAllDay ? root.eventDate : (root.eventDate + "T" + root.eventStartTime + ":00")
-    var endIso = root.eventAllDay ? root.eventDate : (root.eventDate + "T" + root.eventEndTime + ":00")
+    var startIso = root.eventAllDay ? date : (date + "T" + startTime + ":00")
+    var endIso = root.eventAllDay ? date : (date + "T" + endTime + ":00")
 
     var payload = {
       title: root.eventTitle.trim(),
@@ -153,13 +197,21 @@ Panel {
       description: root.eventDescription.trim()
     }
 
+    var editing = root.editingEvent
+    if (editing) {
+      payload.id = editing.id
+      payload.calendar = editing.calendar
+      payload.calendarId = editing.calendarId || ""
+      payload.calendarType = editing.calendarType || "local"
+    }
+
     pendingEventPayloadJson = JSON.stringify(payload)
-    createEventProc.command = [
+    saveEventProc.command = [
       "python3",
       Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),
-      "--create-event"
+      editing ? "--update-event" : "--create-event"
     ]
-    createEventProc.running = true
+    saveEventProc.running = true
   }
 
   function deleteEvent(evt) {
@@ -697,7 +749,7 @@ Panel {
   }
 
   Process {
-    id: createEventProc
+    id: saveEventProc
     stdinEnabled: true
     onStarted: {
       write(root.pendingEventPayloadJson + "\n")
@@ -707,7 +759,13 @@ Panel {
       onStreamFinished: {
         root.eventSubmitting = false
         root.pendingEventPayloadJson = ""
-        root.addingEvent = false
+        var result = null
+        try { result = JSON.parse(this.text) } catch (e) {}
+        if (!result || result.status !== "success") {
+          root.eventErrorMessage = (result && result.message) || "Could not create the event"
+        } else {
+          root.addingEvent = false
+        }
         eventsFile.reload()
       }
     }
@@ -1810,7 +1868,7 @@ Panel {
                       spacing: Style.space(6)
                       Text {
                         textFormat: Text.PlainText
-                        text: "NEW EVENT"
+                        text: root.editingEvent ? "EDIT EVENT" : "NEW EVENT"
                         color: Color.accent
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -1819,7 +1877,7 @@ Panel {
                       }
                       Text {
                         textFormat: Text.PlainText
-                        text: "· " + root.eventDate
+                        text: "· " + (root.editingEvent ? root.eventCalendar : root.eventDate)
                         color: Qt.darker(root.contentForeground, 1.6)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -1847,8 +1905,19 @@ Panel {
                   onTextChanged: root.eventTitle = text
                 }
 
-                // Calendar Selector Row
+                // Date Input
+                TextField {
+                  width: Style.space(110)
+                  placeholderText: "YYYY-MM-DD"
+                  text: root.eventDate
+                  foreground: root.contentForeground
+                  font.family: root.contentFontFamily
+                  onTextChanged: root.eventDate = text
+                }
+
+                // Calendar Selector Row (an edited event stays on its calendar)
                 Column {
+                  visible: !root.editingEvent
                   width: parent.width
                   spacing: Style.space(4)
                   Text {
@@ -2090,7 +2159,7 @@ Panel {
                       Text {
                         textFormat: Text.PlainText
                         id: submitEventBtnText
-                        text: root.eventSubmitting ? "Adding..." : "Save Event"
+                        text: root.eventSubmitting ? "Saving..." : (root.editingEvent ? "Save Changes" : "Save Event")
                         color: Color.background
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -2102,7 +2171,7 @@ Panel {
                       anchors.fill: parent
                       enabled: root.eventTitle.trim() && !root.eventSubmitting
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.submitNewEvent()
+                      onClicked: root.submitEvent()
                     }
                   }
                 }
@@ -2253,8 +2322,9 @@ Panel {
                     color: modelData.color || Color.accent
                   }
 
-                  // Delete button for writable events
+                  // Edit and delete buttons for writable events
                   PanelActionButton {
+                    id: deleteEventButton
                     visible: Boolean(modelData.writable)
                     anchors.right: parent.right
                     anchors.top: parent.top
@@ -2267,13 +2337,26 @@ Panel {
                     onClicked: root.deleteEvent(modelData)
                   }
 
+                  PanelActionButton {
+                    visible: Boolean(modelData.editable)
+                    anchors.right: deleteEventButton.left
+                    anchors.top: parent.top
+                    anchors.topMargin: Style.space(4)
+                    iconText: "󰏫"
+                    tooltipText: "Edit event"
+                    foreground: root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    opacity: 0.65
+                    onClicked: root.openEditEvent(modelData)
+                  }
+
                   Column {
                     id: eventContentCol
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(14)
-                    anchors.rightMargin: modelData.writable ? Style.space(32) : Style.space(10)
+                    anchors.rightMargin: modelData.editable ? Style.space(56) : (modelData.writable ? Style.space(32) : Style.space(10))
                     spacing: Style.space(2)
 
                     Row {

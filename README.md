@@ -1,6 +1,6 @@
 # Chronica - calendar & clock for Omarchy
 
-**Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way on Google, JMAP and CalDAV (iCloud, Nextcloud): create and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
+**Every calendar you own, in your Omarchy bar.** Google, iCloud, Proton, Outlook, Fastmail (JMAP), Nextcloud, Stalwart, or any `.ics` / `webcal` feed. Two-way on Google, JMAP and CalDAV (iCloud, Nextcloud): create, edit and delete events without leaving the desktop. Reminders, one-click meeting join, and an offline calendar when you have no account at all.
 
 ```bash
 omarchy plugin add https://github.com/promaaa/sync-calendar-omarchy.git --enable --yes
@@ -23,7 +23,7 @@ Follows your Omarchy theme (the shots below are three different ones). Works wit
 
 ## Features
 
-- **Two-Way Event Sync & Creation**: Add (`󰐕` or `n` hotkey) and delete (`󰆴`) events directly from your desktop into writable calendars (**Google Calendar API**, **JMAP / Fastmail / Stalwart**, **CalDAV / Apple iCloud / Nextcloud**, and **Local Offline Calendars**).
+- **Two-Way Event Sync & Creation**: Add (`󰐕` or `n` hotkey), edit (`󰏫`) and delete (`󰆴`) events directly from your desktop into writable calendars (**Google Calendar API**, **JMAP / Fastmail / Stalwart**, **CalDAV / Apple iCloud / Nextcloud**, and **Local Offline Calendars**). Times accept `14:30`, `1430` or `2:30pm`. Editing covers single-day events; on Google it also covers one occurrence of a recurring event, while CalDAV and JMAP series and multi-day events stay delete-only for now. CalDAV edits keep alarms and attendees, and refuse to overwrite a change made meanwhile on another device.
 - **Universal iCalendar & JMAP Support**: Compatible with any calendar service providing an `.ics` / `webcal://` link (Google, Apple iCloud, Proton, Outlook / Office 365, Nextcloud, generic iCal) or modern **JMAP** API (Fastmail, Stalwart, Cyrus IMAP, Apache James).
 - **Offline Local Calendar**: Create and manage local events stored in `~/.local/state/omarchy/local-events.json` without needing any external cloud account.
 - **One-Click "Join Meeting"**: Automatically detects Google Meet, Zoom, Microsoft Teams, Webex, and Jitsi links in event details and displays an instant join button.
@@ -174,7 +174,7 @@ Edits to `calendars.json` hot-reload automatically without restarting the shell.
 3. Copy the `webcal://...` link.
 
 That published link is read-only: it shows your events but cannot accept new ones.
-To also **create and delete iCloud events** from the panel, add CalDAV credentials
+To also **create, edit and delete iCloud events** from the panel, add CalDAV credentials
 to the same entry:
 
 1. Create an app-specific password at [appleid.apple.com](https://appleid.apple.com/)
@@ -242,7 +242,7 @@ JMAP is a modern, fast, JSON-based calendar standard ([RFC 9670](https://www.rfc
    - Set User Type to **External** (or **Internal** if using a company Google Workspace account).
    - Enter an app name (e.g., `Omarchy Calendar`) and save.
    - Under **Test users**, click **+ Add users** and **add your Google email address**.
-   - **Publish the app.** On the consent screen / **Audience** page, set **Publishing status** to **In production** (click **Publish app**). No Google review is needed for personal use of the `calendar.events` scope (read, create and delete events); you will just see an "unverified app" warning once during sign-in.
+   - **Publish the app.** On the consent screen / **Audience** page, set **Publishing status** to **In production** (click **Publish app**). No Google review is needed for personal use of the `calendar.events` scope (read, create, edit and delete events); you will just see an "unverified app" warning once during sign-in.
 
 > [!IMPORTANT]
 > Leaving the app in **Testing** status makes Google expire the refresh token after **7 days**. The plugin then shows `auth_expired` for that calendar and the events disappear until you sign in again. Publishing the app is what makes the connection permanent. If your Google account belongs to a Workspace organisation (school or company), choosing User Type **Internal** has the same effect.

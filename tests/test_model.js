@@ -137,3 +137,26 @@ test("Model.stepToWeekBound", () => {
     day: 19
   });
 });
+
+test("Model.parseTimeInput accepts 24h and 12h input, rejects garbage", () => {
+  const cases = {
+    "14:30": "14:30", "9:05": "09:05", "9": "09:00", "1430": "14:30", "14.30": "14:30",
+    "2pm": "14:00", "2:30 PM": "14:30", "11:15 a.m.": "11:15", "12am": "00:00", "12pm": "12:00",
+  };
+  for (const [input, expected] of Object.entries(cases)) {
+    assert.equal(Model.parseTimeInput(input), expected, input);
+  }
+  for (const input of ["", "24:00", "13pm", "0am", "9:60", "noon", "9:5"]) {
+    assert.equal(Model.parseTimeInput(input), "", input);
+  }
+  assert.equal(Model.calculateEndTime("2:30pm", 30), "15:00");
+});
+
+test("Model.parseDateInput accepts real days only", () => {
+  assert.equal(Model.parseDateInput("2026-09-14"), "2026-09-14");
+  assert.equal(Model.parseDateInput(" 2026-9-4 "), "2026-09-04");
+  assert.equal(Model.parseDateInput("2028-02-29"), "2028-02-29");
+  for (const input of ["", "2026-02-29", "2026-13-01", "2026-04-31", "14/09/2026", "tomorrow"]) {
+    assert.equal(Model.parseDateInput(input), "", input);
+  }
+});

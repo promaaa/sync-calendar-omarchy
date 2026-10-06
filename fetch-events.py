@@ -19,7 +19,7 @@ import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, time as dt_time, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -520,295 +520,181 @@ def extract_meeting_info(location, description, summary):
     return None, None
 
 
-def get_monthly_dates(year, month, start_dt, rrule):
-    byday_str = rrule.get("BYDAY", "")
-    bymonthday_str = rrule.get("BYMONTHDAY", "")
-    bysetpos_str = rrule.get("BYSETPOS", "")
-    num_days = calendar.monthrange(year, month)[1]
-
-    if bymonthday_str:
-        dates = []
-        for mday_str in bymonthday_str.split(","):
-            mday_str = mday_str.strip()
-            if not mday_str:
-                continue
-            try:
-                mday = int(mday_str)
-                if mday < 0:
-                    mday = num_days + 1 + mday
-                if 1 <= mday <= num_days:
-                    dates.append(datetime(year, month, mday, start_dt.hour, start_dt.minute, start_dt.second))
-            except ValueError:
-                pass
-        return dates
-
-    if byday_str:
-        target_days = []
-        bysetpos = int(bysetpos_str) if bysetpos_str and bysetpos_str.lstrip("-+").isdigit() else None
-
-        for part in byday_str.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            m = re.match(r"^([+-]?\d+)?([A-Za-z]{2})$", part)
-            if m:
-                ord_str, day_code = m.group(1), m.group(2).upper()
-                if day_code in WEEKDAYS:
-                    w_idx = WEEKDAYS.index(day_code)
-                    ordinal = int(ord_str) if ord_str else (bysetpos if bysetpos is not None else None)
-
-                    matching_days = [
-                        d for d in range(1, num_days + 1)
-                        if datetime(year, month, d).weekday() == w_idx
-                    ]
-
-                    if ordinal is not None:
-                        if ordinal > 0 and ordinal <= len(matching_days):
-                            target_days.append(matching_days[ordinal - 1])
-                        elif ordinal < 0 and abs(ordinal) <= len(matching_days):
-                            target_days.append(matching_days[ordinal])
-                    else:
-                        target_days.extend(matching_days)
-
-        target_days = sorted(list(set(target_days)))
-        return [datetime(year, month, d, start_dt.hour, start_dt.minute, start_dt.second) for d in target_days]
-
-    day = start_dt.day
-    if day <= num_days:
-        return [datetime(year, month, day, start_dt.hour, start_dt.minute, start_dt.second)]
-    return []
+def _rule_ints(rule, key, lo, hi, signed=False):
+    """Integers of a comma list (BYMONTH=1,-1). Values out of range are dropped."""
+    out = []
+    for part in str(rule.get(key) or "").split(","):
+        part = part.strip()
+        if not re.fullmatch(r"[+-]?\d+", part):
+            continue
+        n = int(part)
+        if lo <= n <= hi or (signed and -hi <= n <= -1):
+            out.append(n)
+    return out
 
 
-def expand_weekly(event, window_start, window_end, rrule, until_dt, max_count):
-    start_dt = event["start_dt"]
-    end_dt = event["end_dt"]
-    duration = end_dt - start_dt
-    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
-    byday_str = rrule.get("BYDAY", "")
-    wkst_str = rrule.get("WKST", "MO").upper()
-    wkst_idx = WEEKDAYS.index(wkst_str) if wkst_str in WEEKDAYS else 0
+def _rule_byday(rule):
+    """BYDAY=MO,-1FR,2TU as [(ordinal or None, weekday index)]."""
+    out = []
+    for part in str(rule.get("BYDAY") or "").split(","):
+        m = re.fullmatch(r"\s*([+-]?\d{1,2})?([A-Za-z]{2})\s*", part)
+        if m and m.group(2).upper() in WEEKDAYS:
+            ordinal = int(m.group(1)) if m.group(1) else None
+            out.append((ordinal or None, WEEKDAYS.index(m.group(2).upper())))
+    return out
 
-    if byday_str:
-        target_weekdays = []
-        for day_code in byday_str.split(","):
-            code = day_code.strip()[-2:].upper()
-            if code in WEEKDAYS:
-                target_weekdays.append(WEEKDAYS.index(code))
-        target_weekdays = sorted(list(set(target_weekdays)), key=lambda d: (d - wkst_idx) % 7)
+
+def _week1_start(year, wkst):
+    """First day of week 1: the first WKST-based week with 4+ days in `year`."""
+    jan1 = date(year, 1, 1)
+    offset = (jan1.weekday() - wkst) % 7
+    return jan1 - timedelta(days=offset) if 7 - offset >= 4 else jan1 + timedelta(days=7 - offset)
+
+
+def _week_number(d, wkst):
+    """(week-numbering year, week number, weeks in that year) of a date."""
+    year = d.year
+    start = _week1_start(year, wkst)
+    if d < start:
+        year -= 1
+        start = _week1_start(year, wkst)
+    elif d >= _week1_start(year + 1, wkst):
+        year += 1
+        start = _week1_start(year, wkst)
+    weeks = (_week1_start(year + 1, wkst) - start).days // 7
+    return year, (d - start).days // 7 + 1, weeks
+
+
+def _resolve(values, size):
+    """Turn negative positions (-1 = last) into positive ones for a set of `size`."""
+    return {v if v > 0 else size + 1 + v for v in values}
+
+
+def rrule_occurrences(dtstart, rule, skip_to=None, stop_after=None):
+    """
+    Yield the start of every occurrence of an RRULE (RFC 5545 3.3.10), in order,
+    as naive datetimes on DTSTART's wall clock. DTSTART is the first occurrence.
+
+    Each period (a year, month, week or day, every INTERVAL) gives candidate
+    days. The BYxxx parts keep the days that match all of them, BYHOUR,
+    BYMINUTE and BYSECOND give the times, and BYSETPOS picks positions in the
+    period. `skip_to` jumps whole periods forward (only without COUNT, which
+    must count from DTSTART); `stop_after` ends the walk.
+    """
+    freq = str(rule.get("FREQ") or "").upper()
+    if freq not in ("YEARLY", "MONTHLY", "WEEKLY", "DAILY"):
+        # ponytail: HOURLY/MINUTELY/SECONDLY yield DTSTART only; calendar feeds
+        # do not use them. Add a sub-day period here if one ever does.
+        yield dtstart
+        return
+
+    interval = max(1, safe_int_param(rule.get("INTERVAL"), 1))
+    wkst_code = str(rule.get("WKST") or "MO").upper()
+    wkst = WEEKDAYS.index(wkst_code) if wkst_code in WEEKDAYS else 0
+    bymonth = set(_rule_ints(rule, "BYMONTH", 1, 12))
+    bymonthday = _rule_ints(rule, "BYMONTHDAY", 1, 31, signed=True)
+    byyearday = _rule_ints(rule, "BYYEARDAY", 1, 366, signed=True)
+    byweekno = _rule_ints(rule, "BYWEEKNO", 1, 53, signed=True)
+    byday = _rule_byday(rule)
+    bysetpos = _rule_ints(rule, "BYSETPOS", 1, 366, signed=True)
+    byhour = sorted(set(_rule_ints(rule, "BYHOUR", 0, 23)))
+    byminute = sorted(set(_rule_ints(rule, "BYMINUTE", 0, 59)))
+    bysecond = sorted(set(_rule_ints(rule, "BYSECOND", 0, 59)))
+
+    # Parts the rule leaves out come from DTSTART.
+    if freq == "YEARLY" and not (byweekno or byyearday or bymonthday or byday):
+        bymonth = bymonth or {dtstart.month}
+        bymonthday = [dtstart.day]
+    elif freq == "MONTHLY" and not (bymonthday or byday):
+        bymonthday = [dtstart.day]
+    elif freq == "WEEKLY" and not byday:
+        byday = [(None, dtstart.weekday())]
+
+    times = [dt_time(h, m, s)
+             for h in (byhour or [dtstart.hour])
+             for m in (byminute or [dtstart.minute])
+             for s in (bysecond or [dtstart.second])]
+
+    weekdays_any = {wd for ordinal, wd in byday if ordinal is None}
+    ordinals = [(o, wd) for o, wd in byday if o is not None]
+    # RFC 5545: ordinals count within the month for MONTHLY (and YEARLY with
+    # BYMONTH), within the year for YEARLY, and mean nothing for WEEKLY/DAILY.
+    if freq in ("WEEKLY", "DAILY") or (freq == "YEARLY" and byweekno):
+        weekdays_any |= {wd for _, wd in ordinals}
+        ordinals = []
+    month_scope = freq == "MONTHLY" or (freq == "YEARLY" and bool(bymonth))
+
+    def day_matches(d):
+        if bymonth and d.month not in bymonth:
+            return False
+        if bymonthday and d.day not in _resolve(bymonthday, calendar.monthrange(d.year, d.month)[1]):
+            return False
+        year_len = 366 if calendar.isleap(d.year) else 365
+        doy = d.timetuple().tm_yday
+        if byyearday and doy not in _resolve(byyearday, year_len):
+            return False
+        if byweekno:
+            _, week, weeks = _week_number(d, wkst)
+            if week not in _resolve(byweekno, weeks):
+                return False
+        if byday:
+            wd = d.weekday()
+            if wd in weekdays_any:
+                return True
+            if month_scope:
+                pos, size = d.day, calendar.monthrange(d.year, d.month)[1]
+            else:
+                pos, size = doy, year_len
+            nth, nth_last = (pos - 1) // 7 + 1, -((size - pos) // 7 + 1)
+            return any(wd == w and o in (nth, nth_last) for o, w in ordinals)
+        return True
+
+    def period_days(k):
+        if freq == "YEARLY":
+            year = dtstart.year + k
+            months = sorted(bymonth) if bymonth else range(1, 13)
+            return [date(year, m, d) for m in months for d in range(1, calendar.monthrange(year, m)[1] + 1)]
+        if freq == "MONTHLY":
+            year, month0 = divmod(dtstart.month - 1 + k, 12)
+            year += dtstart.year
+            return [date(year, month0 + 1, d) for d in range(1, calendar.monthrange(year, month0 + 1)[1] + 1)]
+        if freq == "WEEKLY":
+            first = dtstart.date() - timedelta(days=(dtstart.weekday() - wkst) % 7) + timedelta(weeks=k)
+            return [first + timedelta(days=i) for i in range(7)]
+        return [dtstart.date() + timedelta(days=k)]
+
+    def periods_until(target):
+        """Whole periods between DTSTART's period and the one holding `target`."""
+        if freq == "YEARLY":
+            return target.year - dtstart.year
+        if freq == "MONTHLY":
+            return (target.year - dtstart.year) * 12 + target.month - dtstart.month
+        if freq == "WEEKLY":
+            first = dtstart.date() - timedelta(days=(dtstart.weekday() - wkst) % 7)
+            return (target.date() - first).days // 7
+        return (target.date() - dtstart.date()).days
+
+    k = 0
+    if skip_to is not None and skip_to > dtstart:
+        k = max(0, (periods_until(skip_to) - 1) // interval * interval)
     else:
-        target_weekdays = [start_dt.weekday()]
+        yield dtstart
 
-    exdates = set(event.get("exdates", []))
-    instances = []
+    for _ in range(MAX_RECURRENCE_ITERATIONS):
+        try:
+            days = period_days(k)
+        except (ValueError, OverflowError):
+            return  # past year 9999
+        if stop_after is not None and days and datetime.combine(days[0], dt_time()) > stop_after:
+            return
+        found = [datetime.combine(d, t) for d in days if day_matches(d) for t in times]
+        if bysetpos:
+            found = [found[p - 1] for p in sorted(_resolve(bysetpos, len(found))) if 1 <= p <= len(found)]
+        for occurrence in found:
+            if occurrence > dtstart:
+                yield occurrence
+        k += interval
 
-    days_since_wkst = (start_dt.weekday() - wkst_idx) % 7
-    week_start_date = (start_dt - timedelta(days=days_since_wkst)).date()
-
-    count = 0
-    cur_week_start = week_start_date
-    has_count = bool(rrule.get("COUNT"))
-
-    # Fast forward if event started long before window and has no fixed COUNT
-    if not has_count and cur_week_start < (window_start - timedelta(weeks=interval)).date():
-        weeks_behind = (window_start.date() - cur_week_start).days // 7
-        if weeks_behind > 0:
-            cur_week_start += timedelta(weeks=(weeks_behind // interval) * interval)
-
-    iterations = 0
-    while count < max_count and iterations < MAX_RECURRENCE_ITERATIONS and len(instances) < MAX_EXPANDED_INSTANCES:
-        iterations += 1
-        week_start_dt = datetime.combine(cur_week_start, datetime.min.time())
-        if week_start_dt > window_end:
-            break
-        if until_dt and week_start_dt > until_dt:
-            break
-
-        for day_offset in range(7):
-            cur_date = cur_week_start + timedelta(days=day_offset)
-            weekday = cur_date.weekday()
-            if weekday in target_weekdays:
-                cur_dt = datetime.combine(cur_date, start_dt.time())
-                if cur_dt < start_dt:
-                    continue
-                if until_dt and cur_dt > until_dt:
-                    break
-
-                count += 1
-                date_key = cur_dt.strftime("%Y-%m-%d")
-                if cur_dt >= window_start and cur_dt <= window_end and date_key not in exdates:
-                    inst = dict(event)
-                    inst["start_dt"] = cur_dt
-                    inst["end_dt"] = cur_dt + duration
-                    inst["date_key"] = date_key
-                    instances.append(inst)
-
-                if count >= max_count or len(instances) >= MAX_EXPANDED_INSTANCES:
-                    break
-
-        cur_week_start += timedelta(weeks=interval)
-
-    return instances
-
-
-def expand_daily(event, window_start, window_end, rrule, until_dt, max_count):
-    start_dt = event["start_dt"]
-    end_dt = event["end_dt"]
-    duration = end_dt - start_dt
-    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
-    byday_str = rrule.get("BYDAY", "")
-
-    target_weekdays = None
-    if byday_str:
-        target_weekdays = []
-        for day_code in byday_str.split(","):
-            code = day_code.strip()[-2:].upper()
-            if code in WEEKDAYS:
-                target_weekdays.append(WEEKDAYS.index(code))
-
-    exdates = set(event.get("exdates", []))
-    instances = []
-    cur_dt = start_dt
-    count = 0
-    has_count = bool(rrule.get("COUNT"))
-
-    # Fast forward if event started long before window and has no fixed COUNT
-    if not has_count and cur_dt < (window_start - timedelta(days=interval)):
-        days_behind = (window_start.date() - cur_dt.date()).days
-        if days_behind > 0:
-            cur_dt += timedelta(days=(days_behind // interval) * interval)
-
-    iterations = 0
-    while count < max_count and cur_dt <= window_end and iterations < MAX_RECURRENCE_ITERATIONS and len(instances) < MAX_EXPANDED_INSTANCES:
-        iterations += 1
-        if until_dt and cur_dt > until_dt:
-            break
-
-        match = True
-        if target_weekdays is not None:
-            match = cur_dt.weekday() in target_weekdays
-
-        if match:
-            count += 1
-            date_key = cur_dt.strftime("%Y-%m-%d")
-            if cur_dt >= window_start and date_key not in exdates:
-                inst = dict(event)
-                inst["start_dt"] = cur_dt
-                inst["end_dt"] = cur_dt + duration
-                inst["date_key"] = date_key
-                instances.append(inst)
-
-        cur_dt += timedelta(days=interval)
-
-    return instances
-
-
-def expand_monthly(event, window_start, window_end, rrule, until_dt, max_count):
-    start_dt = event["start_dt"]
-    end_dt = event["end_dt"]
-    duration = end_dt - start_dt
-    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
-    exdates = set(event.get("exdates", []))
-
-    instances = []
-    cur_year = start_dt.year
-    cur_month = start_dt.month
-    count = 0
-    has_count = bool(rrule.get("COUNT"))
-
-    if not has_count and cur_year < window_start.year - 1:
-        years_behind = window_start.year - 1 - cur_year
-        cur_year += years_behind
-
-    iterations = 0
-    while count < max_count and iterations < MAX_RECURRENCE_ITERATIONS and len(instances) < MAX_EXPANDED_INSTANCES:
-        iterations += 1
-        month_start_dt = datetime(cur_year, cur_month, 1, 0, 0, 0)
-        if until_dt and month_start_dt > until_dt:
-            break
-        if month_start_dt > window_end:
-            break
-
-        cand_dates = get_monthly_dates(cur_year, cur_month, start_dt, rrule)
-        for cur_dt in cand_dates:
-            if cur_dt < start_dt:
-                continue
-            if until_dt and cur_dt > until_dt:
-                break
-            count += 1
-            date_key = cur_dt.strftime("%Y-%m-%d")
-            if cur_dt >= window_start and cur_dt <= window_end and date_key not in exdates:
-                inst = dict(event)
-                inst["start_dt"] = cur_dt
-                inst["end_dt"] = cur_dt + duration
-                inst["date_key"] = date_key
-                instances.append(inst)
-            if count >= max_count or len(instances) >= MAX_EXPANDED_INSTANCES:
-                break
-
-        total_months = (cur_year * 12 + cur_month - 1) + interval
-        cur_year = total_months // 12
-        cur_month = (total_months % 12) + 1
-
-    return instances
-
-
-def expand_yearly(event, window_start, window_end, rrule, until_dt, max_count):
-    start_dt = event["start_dt"]
-    end_dt = event["end_dt"]
-    duration = end_dt - start_dt
-    interval = max(1, safe_int_param(rrule.get("INTERVAL"), 1))
-    exdates = set(event.get("exdates", []))
-    bymonth_str = rrule.get("BYMONTH", "")
-
-    target_months = []
-    if bymonth_str:
-        for m_str in bymonth_str.split(","):
-            if m_str.strip().isdigit():
-                m_val = int(m_str.strip())
-                if 1 <= m_val <= 12:
-                    target_months.append(m_val)
-    if not target_months:
-        target_months = [start_dt.month]
-
-    instances = []
-    cur_year = start_dt.year
-    count = 0
-    has_count = bool(rrule.get("COUNT"))
-
-    if not has_count and cur_year < window_start.year - 1:
-        years_behind = window_start.year - 1 - cur_year
-        cur_year += (years_behind // interval) * interval
-
-    iterations = 0
-    while count < max_count and iterations < MAX_RECURRENCE_ITERATIONS and len(instances) < MAX_EXPANDED_INSTANCES:
-        iterations += 1
-        year_start_dt = datetime(cur_year, 1, 1, 0, 0, 0)
-        if until_dt and year_start_dt > until_dt:
-            break
-        if year_start_dt > window_end:
-            break
-
-        for month in target_months:
-            cand_dates = get_monthly_dates(cur_year, month, start_dt, rrule)
-            for cur_dt in cand_dates:
-                if cur_dt < start_dt:
-                    continue
-                if until_dt and cur_dt > until_dt:
-                    break
-                count += 1
-                date_key = cur_dt.strftime("%Y-%m-%d")
-                if cur_dt >= window_start and cur_dt <= window_end and date_key not in exdates:
-                    inst = dict(event)
-                    inst["start_dt"] = cur_dt
-                    inst["end_dt"] = cur_dt + duration
-                    inst["date_key"] = date_key
-                    instances.append(inst)
-                if count >= max_count or len(instances) >= MAX_EXPANDED_INSTANCES:
-                    break
-
-        cur_year += interval
-
-    return instances
 
 
 def expand_recurring_event(event, window_start, window_end):
@@ -865,7 +751,6 @@ def expand_rrule_in_wall_time(event, window_start, window_end, zone=None):
     a floating UNTIL is already on DTSTART's clock (RFC 5545 3.3.10).
     """
     rrule = event["rrule"]
-    freq = rrule.get("FREQ", "").upper()
     until_str = rrule.get("UNTIL")
     count_str = rrule.get("COUNT")
 
@@ -881,22 +766,32 @@ def expand_rrule_in_wall_time(event, window_start, window_end, zone=None):
         if until_dt < window_start:
             return []
 
-    max_count = min(safe_int_param(count_str, 1000), 1000)
-
+    count = safe_int_param(count_str, 0) if count_str else 0
     start_dt = event["start_dt"]
-    if freq == "WEEKLY":
-        return expand_weekly(event, window_start, window_end, rrule, until_dt, max_count)
-    elif freq == "DAILY":
-        return expand_daily(event, window_start, window_end, rrule, until_dt, max_count)
-    elif freq == "MONTHLY":
-        return expand_monthly(event, window_start, window_end, rrule, until_dt, max_count)
-    elif freq == "YEARLY":
-        return expand_yearly(event, window_start, window_end, rrule, until_dt, max_count)
-    else:
-        if start_dt.strftime("%Y-%m-%d") not in event.get("exdates", []):
-            if window_start <= start_dt <= window_end:
-                return [dict(event)]
-        return []
+    duration = event["end_dt"] - start_dt
+    exdates = set(event.get("exdates", []))
+    stop_after = min(window_end, until_dt) if until_dt else window_end
+
+    instances = []
+    seen = 0
+    for occurrence in rrule_occurrences(start_dt, rrule,
+                                        skip_to=None if count else window_start,
+                                        stop_after=stop_after):
+        if occurrence > stop_after:
+            break
+        seen += 1
+        if count and seen > count:
+            break
+        date_key = occurrence.strftime("%Y-%m-%d")
+        if occurrence >= window_start and date_key not in exdates:
+            inst = dict(event)
+            inst["start_dt"] = occurrence
+            inst["end_dt"] = occurrence + duration
+            inst["date_key"] = date_key
+            instances.append(inst)
+            if len(instances) >= MAX_EXPANDED_INSTANCES:
+                break
+    return instances
 
 
 def expand_multiday_event(event, window_start, window_end):
@@ -976,7 +871,7 @@ def parse_ics(content, cal_info, window_start, window_end):
             continue
         if line == "BEGIN:VEVENT":
             in_vevent = True
-            current = {"exdates": []}
+            current = {"exdates": [], "rdates": []}
             continue
         elif line == "END:VEVENT":
             if in_vevent and "DTSTART" in current:
@@ -1033,6 +928,13 @@ def parse_ics(content, cal_info, window_start, window_end):
         elif prop_name == "RECURRENCE-ID":
             _, rid_dt = parse_datetime_value(val_part.strip(), prop_params)
             current["RECURRENCE-ID"] = rid_dt.strftime("%Y-%m-%d")
+        elif prop_name == "RDATE":
+            # Extra occurrences. A PERIOD value ("start/end") keeps its start.
+            for rd_val in val_part.split(","):
+                rd_val = rd_val.split("/", 1)[0].strip()
+                if rd_val:
+                    _, rd_dt = parse_datetime_value(rd_val, [p for p in prop_params if not p.upper().startswith("VALUE=")])
+                    current["rdates"].append(rd_dt)
         elif prop_name == "EXDATE":
             for ex_val in val_part.split(","):
                 ex_val = ex_val.strip()
@@ -1090,7 +992,7 @@ def parse_ics(content, cal_info, window_start, window_end):
             "meetingProvider": meeting_provider or "",
             "rrule": raw.get("RRULE"),
             # Overrides of one occurrence have no RRULE of their own.
-            "recurring": bool(raw.get("RRULE")) or "RECURRENCE-ID" in raw,
+            "recurring": bool(raw.get("RRULE") or raw.get("rdates")) or "RECURRENCE-ID" in raw,
             "tz": raw.get("TZ"),
             "exdates": raw.get("exdates", []),
         }
@@ -1099,17 +1001,30 @@ def parse_ics(content, cal_info, window_start, window_end):
             evt["exdates"] = evt["exdates"] + sorted(overridden.get(raw.get("UID"), ()))
 
         if evt["rrule"]:
-            expanded = expand_recurring_event(evt, window_start, window_end)
-            for rec_inst in expanded:
-                multidays = expand_multiday_event(rec_inst, window_start, window_end)
-                normalized.extend(multidays)
+            occurrences = expand_recurring_event(evt, window_start, window_end)
+        elif start_dt.strftime("%Y-%m-%d") not in evt["exdates"]:
+            occurrences = [evt]
         else:
-            if start_dt.strftime("%Y-%m-%d") not in evt["exdates"]:
-                multidays = expand_multiday_event(evt, window_start, window_end)
-                for inst in multidays:
-                    inst_dt = datetime.strptime(inst["date_key"], "%Y-%m-%d")
-                    if window_start <= inst_dt <= window_end:
-                        normalized.append(inst)
+            occurrences = []
+
+        # RDATE adds occurrences next to (or instead of) the RRULE ones.
+        taken = {occ["start_dt"] for occ in occurrences}
+        for rd_dt in raw.get("rdates", []):
+            date_key = rd_dt.strftime("%Y-%m-%d")
+            if rd_dt in taken or date_key in evt["exdates"] or not window_start <= rd_dt <= window_end:
+                continue
+            taken.add(rd_dt)
+            inst = dict(evt)
+            inst["start_dt"] = rd_dt
+            inst["end_dt"] = rd_dt + (end_dt - start_dt)
+            inst["date_key"] = date_key
+            occurrences.append(inst)
+
+        for occ in occurrences:
+            for inst in expand_multiday_event(occ, window_start, window_end):
+                inst_dt = datetime.strptime(inst["date_key"], "%Y-%m-%d")
+                if window_start <= inst_dt <= window_end:
+                    normalized.append(inst)
 
     return normalized
 

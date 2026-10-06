@@ -16,6 +16,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+      # Tests only: compares the recurrence engine with dateutil. The plugin
+      # itself stays standard-library only.
+      - name: Test dependencies
+        run: pip install python-dateutil
       - name: Python tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Model.js tests

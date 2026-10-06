@@ -7,6 +7,7 @@ Acquires and stores a refresh token for accessing private/shared Google Calendar
 import os
 import sys
 import json
+from html import escape as html_escape
 import time
 import secrets
 import stat
@@ -26,6 +27,7 @@ MAX_API_BYTES = 5 * 1024 * 1024     # 5 MB limit for API JSON responses
 MAX_CONFIG_BYTES = 1 * 1024 * 1024  # 1 MB limit for config/auth files
 
 auth_code = None
+auth_failed = False
 expected_state = None
 
 
@@ -167,7 +169,7 @@ def write_secure_json(path, data, mode=0o600, max_bytes=MAX_CONFIG_BYTES):
 
 class OAuthCallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        global auth_code, expected_state
+        global auth_code, auth_failed, expected_state
         query = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(query)
 
@@ -205,7 +207,9 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             """
             self.wfile.write(html.encode("utf-8"))
         else:
-            error = params.get("error", ["Unknown error"])[0]
+            # The state matched, so this is Google's answer: stop waiting.
+            auth_failed = True
+            error = html_escape(params.get("error", ["Unknown error"])[0])
             self.send_response(400)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
@@ -315,7 +319,9 @@ def main():
     webbrowser.open(auth_url)
 
     print("Waiting for authorization in browser (timeout: 10 minutes)...")
-    while not auth_code:
+    deadline = time.monotonic() + server.timeout
+    while not auth_code and not auth_failed and time.monotonic() < deadline:
+        server.timeout = max(1, deadline - time.monotonic())
         server.handle_request()
 
     if not auth_code:

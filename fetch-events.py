@@ -269,8 +269,9 @@ def unfold_lines(raw_text):
 def unescape_ical_text(val):
     if not val:
         return ""
-    val = val.replace("\\n", "\n").replace("\\N", "\n")
-    val = val.replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+    # One pass, so an escaped backslash followed by "n" stays a backslash + n.
+    escapes = {"n": "\n", "N": "\n", ",": ",", ";": ";", "\\": "\\"}
+    val = re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), m.group(0)), val)
     return val.strip()
 
 
@@ -388,7 +389,7 @@ def parse_datetime_value(val_str, params=None):
     Returns: (is_all_day: bool, dt: datetime)
     """
     val_str = val_str.strip()
-    if params and any("VALUE=DATE" in p.upper() for p in params):
+    if params and any(p.strip().upper() == "VALUE=DATE" for p in params):
         # e.g. 20260816
         try:
             d = datetime.strptime(val_str[:8], "%Y%m%d").date()
@@ -961,8 +962,18 @@ def parse_ics(content, cal_info, window_start, window_end):
     overridden = {}
     in_vevent = False
     current = {}
+    # Depth of nested components (VALARM) inside the VEVENT: their DESCRIPTION,
+    # SUMMARY or DURATION belong to the alarm, not to the event.
+    nested = 0
 
     for line in lines:
+        if in_vevent and line.startswith("BEGIN:") and line != "BEGIN:VEVENT":
+            nested += 1
+            continue
+        if nested:
+            if line.startswith("END:"):
+                nested -= 1
+            continue
         if line == "BEGIN:VEVENT":
             in_vevent = True
             current = {"exdates": []}
@@ -1302,18 +1313,30 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
         "maxResults": "250",
     })
 
-    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events?{params}"
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {access_token}",
-        "User-Agent": USER_AGENT,
-    })
+    base_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events?{params}"
 
     try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-            data = json.loads(raw.decode("utf-8"))
+        items = []
+        page_token = None
+        # A page holds at most 250 events: follow nextPageToken (bounded).
+        for _ in range(20):
+            url = base_url
+            if page_token:
+                url += "&" + urllib.parse.urlencode({"pageToken": page_token})
+            req = urllib.request.Request(url, headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": USER_AGENT,
+            })
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+                data = json.loads(raw.decode("utf-8"))
+            items.extend(data.get("items", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
 
-        items = data.get("items", [])
+        # Shared calendars can be read-only for this account.
+        writable = data.get("accessRole", "owner") in ("owner", "writer")
         auto_translate = cal_info.get("translateKorean", False)
         events = []
 
@@ -1374,7 +1397,7 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
                 "calendar": cal_info.get("name", "Google Calendar"),
                 "calendarId": cal_id,
                 "calendarType": "google",
-                "writable": True,
+                "writable": writable,
                 "color": cal_info.get("color", "#4A90E2"),
                 "all_day": all_day,
                 "start_dt": start_dt,
@@ -1393,7 +1416,7 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
             "name": name,
             "color": cal_info.get("color", "#4A90E2"),
             "type": "google",
-            "writable": True,
+            "writable": writable,
             "events": events,
             "status": "ok",
             "count": len(events),
@@ -2542,6 +2565,7 @@ def ics_escape(value):
         .replace(";", "\\;")
         .replace(",", "\\,")
         .replace("\r\n", "\\n")
+        .replace("\r", "\\n")
         .replace("\n", "\\n")
     )
 

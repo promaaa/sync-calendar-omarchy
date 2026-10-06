@@ -1,6 +1,6 @@
 // Pure date and format math for the clock widget and its calendar panel.
 // Everything here is locale- and Qt-free so it can be unit tested under node
-// (test/shell.d/clock-test.sh); the QML owns month/weekday naming through
+// (tests/test_model.js); the QML owns month/weekday naming through
 // Qt.locale().
 
 var MS_PER_DAY = 86400000
@@ -590,6 +590,54 @@ function parseDateInput(text) {
   return dateKey(y, m, d)
 }
 
+// Which reminder stage a start `diffMin` minutes away falls in, or null.
+// "staged" reminds at 10, 5 and 1 minute; a number reminds once that early.
+function notificationStage(diffMin, noticeSetting) {
+  var s = String(noticeSetting || "staged").toLowerCase()
+  if (s === "staged" || s === "0") {
+    if (diffMin <= 1 && diffMin >= 0) return 1
+    if (diffMin <= 5 && diffMin > 1) return 5
+    if (diffMin <= 10 && diffMin > 5) return 10
+    return null
+  }
+  var mins = parseInt(s, 10) || 10
+  if (diffMin >= 0 && diffMin <= mins) return mins
+  return null
+}
+
+// The reminders due now: [{ key, title, body }], skipping keys already in
+// `sentKeys`. `timeRange(evt)` formats the event's times for the body.
+function dueNotifications(events, nowMs, noticeSetting, sentKeys, timeRange) {
+  var due = []
+  var seen = {}
+  for (var i = 0; i < (events || []).length; i++) {
+    var evt = events[i]
+    if (!evt || evt.allDay || !evt.startIso) continue
+    var startMs = new Date(evt.startIso).getTime()
+    if (isNaN(startMs)) continue
+    var diffMin = Math.round((startMs - nowMs) / 60000)
+    if (diffMin < 0 || diffMin > 35) continue
+    var stage = notificationStage(diffMin, noticeSetting)
+    if (stage === null) continue
+    var key = evt.id + "_" + evt.startIso + "_" + stage
+    // A multi-day event is listed on each of its days: remind once.
+    if ((sentKeys && sentKeys[key]) || seen[key]) continue
+    seen[key] = true
+
+    var body = []
+    if (evt.calendar) body.push("[" + evt.calendar + "]")
+    if (evt.startTime && timeRange) body.push(timeRange(evt))
+    if (evt.meetingProvider) body.push("📹 " + evt.meetingProvider)
+    else if (evt.location) body.push("📍 " + evt.location)
+    due.push({
+      key: key,
+      title: (diffMin <= 1 ? "Starting now: " : "Upcoming in " + diffMin + "m: ") + evt.title,
+      body: body.join("  ·  ")
+    })
+  }
+  return due
+}
+
 function calculateEndTime(startTimeStr, durationMinutes) {
   var start = parseTimeInput(startTimeStr)
   if (!start) return "10:00"
@@ -637,6 +685,8 @@ if (typeof module !== "undefined") {
     formatAgendaMarkdown: formatAgendaMarkdown,
     getWritableCalendars: getWritableCalendars,
     parseTimeInput: parseTimeInput,
+    notificationStage: notificationStage,
+    dueNotifications: dueNotifications,
     parseDateInput: parseDateInput,
     calculateEndTime: calculateEndTime,
     stepDate: stepDate,

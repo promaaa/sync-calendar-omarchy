@@ -160,3 +160,33 @@ test("Model.parseDateInput accepts real days only", () => {
     assert.equal(Model.parseDateInput(input), "", input);
   }
 });
+
+test("Model.notificationStage staged and single reminders", () => {
+  assert.equal(Model.notificationStage(10, "staged"), 10);
+  assert.equal(Model.notificationStage(4, "staged"), 5);
+  assert.equal(Model.notificationStage(0, "staged"), 1);
+  assert.equal(Model.notificationStage(11, "staged"), null);
+  assert.equal(Model.notificationStage(14, "15"), 15);
+  assert.equal(Model.notificationStage(16, "15"), null);
+});
+
+test("Model.dueNotifications sends each due reminder once", () => {
+  const now = Date.parse("2026-10-06T09:55:00");
+  const at = (h, m) => new Date(2026, 9, 6, h, m).toISOString();
+  const events = [
+    { id: "a", title: "Standup", startIso: at(10, 0), startTime: "10:00", calendar: "Work", location: "Room 1" },
+    { id: "b", title: "Review", startIso: at(10, 0), startTime: "10:00", meetingProvider: "Zoom" },
+    { id: "c", title: "Later", startIso: at(11, 0), startTime: "11:00" },
+    { id: "d", title: "Holiday", allDay: true, startIso: at(0, 0) },
+    // A multi-day event appears on two days: one reminder.
+    { id: "b", title: "Review", startIso: at(10, 0), startTime: "10:00", meetingProvider: "Zoom" },
+  ];
+  const due = Model.dueNotifications(events, now, "staged", {}, () => "10:00 - 10:30");
+  assert.deepEqual(due.map((d) => d.title), ["Upcoming in 5m: Standup", "Upcoming in 5m: Review"]);
+  assert.equal(due[0].body, "[Work]  ·  10:00 - 10:30  ·  📍 Room 1");
+  assert.equal(due[1].body, "10:00 - 10:30  ·  📹 Zoom");
+
+  const sent = { [due[0].key]: true };
+  assert.deepEqual(Model.dueNotifications(events, now, "staged", sent, () => "").map((d) => d.title),
+                   ["Upcoming in 5m: Review"]);
+});

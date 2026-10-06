@@ -3,24 +3,36 @@ name: tests
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 3.9 is the oldest Python with zoneinfo, which the backend needs.
+        python-version: ["3.9", "3.x"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.x"
+          python-version: ${{ matrix.python-version }}
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-      # Tests only: compares the recurrence engine with dateutil. The plugin
-      # itself stays standard-library only.
+      # Tests only: dateutil checks the recurrence engine, ruff the Python
+      # code. The plugin itself stays standard-library only.
       - name: Test dependencies
-        run: pip install python-dateutil
+        run: pip install python-dateutil ruff
+      - name: Lint (undefined and unused names)
+        run: ruff check --select F .
       - name: Python tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Model.js tests
         run: node --test tests/test_model.js
+      - name: Release tag matches manifest.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="v$(python -c 'import json; print(json.load(open("manifest.json"))["version"])')"
+          test "$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, manifest $version"; exit 1; }

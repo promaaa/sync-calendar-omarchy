@@ -75,5 +75,14 @@ class GooglePagingTests(unittest.TestCase):
         self.assertFalse(result["events"][0]["writable"])
 
 
+class EventFormValidationTests(unittest.TestCase):
+    def test_end_before_start_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "after the start"):
+            fetch_events.validate_event_times({"start": "2026-09-10T23:00:00", "end": "2026-09-10T01:00:00"})
+
+    def test_all_day_same_date_is_accepted(self):
+        fetch_events.validate_event_times({"start": "2026-09-10", "end": "2026-09-10", "allDay": True})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2017,10 +2017,16 @@ def parse_iso_or_local(val_str):
 
 def validate_event_times(event_data):
     """Reject unreadable start/end values instead of silently booking "now"."""
+    parsed = {}
     for key in ("start", "end"):
         raw = str(event_data.get(key) or "").strip()
-        if raw and parse_local_timestamp(raw) is None:
-            raise ValueError(f"Invalid event {key} '{raw}': use a time like 14:30 or 2:30pm")
+        if raw:
+            parsed[key] = parse_local_timestamp(raw)
+            if parsed[key] is None:
+                raise ValueError(f"Invalid event {key} '{raw}': use a time like 14:30 or 2:30pm")
+    if (not event_data.get("allDay") and parsed.get("start") is not None
+            and parsed.get("end") is not None and parsed["end"] <= parsed["start"]):
+        raise ValueError("The end time must be after the start time")
 
 
 def fetch_local_calendar(cal_info, window_start, window_end):
@@ -3155,6 +3161,7 @@ def sync_all_events():
             "calendarType": str(evt.get("calendarType", "ical")),
             "writable": writable,
             "editable": editable,
+            "recurring": bool(evt.get("rrule") or evt.get("recurring")),
             "description": str(evt.get("description") or ""),
             "color": str(evt.get("color") or "#4A90E2"),
             "allDay": is_all_day,

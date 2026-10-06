@@ -3358,6 +3358,64 @@ def read_stdin_payload(max_bytes=MAX_CONFIG_BYTES):
         return ""
 
 
+def save_config_command(new_config):
+    if not isinstance(new_config, list):
+        raise ValueError("Config must be a JSON array of calendar entries")
+    save_calendars(new_config)
+    return {"status": "success"}
+
+
+def _event_command(handler):
+    def run(payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Payload must be a JSON object")
+        return handler(payload)
+    return run
+
+
+SERVE_COMMANDS = {
+    "sync": lambda payload: sync_all_events(),
+    "save-config": save_config_command,
+    "create-event": _event_command(create_event),
+    "update-event": _event_command(update_event),
+    "delete-event": _event_command(delete_event),
+}
+
+
+def serve(stdin=None, stdout=None):
+    """
+    --serve: one long-lived backend for the panel, instead of one process per
+    call. Reads one JSON request per line, {"id": 1, "cmd": "sync",
+    "payload": ...}, and answers each with one line, {"id": 1, "result": ...},
+    in order. One process runs every call in turn, so two writes never race,
+    and no call pays Python's start-up. It exits when stdin closes, which is
+    when the shell stops or restarts.
+    """
+    stdin = stdin or sys.stdin
+    stdout = stdout or sys.stdout
+    ensure_config_exists()
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    for line in stdin:
+        if not line.strip():
+            continue
+        req_id = None
+        try:
+            if len(line) > MAX_CONFIG_BYTES:
+                raise ValueError(f"Request exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError("Request must be a JSON object")
+            req_id = request.get("id")
+            handler = SERVE_COMMANDS.get(request.get("cmd"))
+            if handler is None:
+                raise ValueError(f"Unknown command {request.get('cmd')!r}")
+            result = handler(request.get("payload"))
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        stdout.write(json.dumps({"id": req_id, "result": result}, ensure_ascii=False) + "\n")
+        stdout.flush()
+
+
 def main():
     try:
         if len(sys.argv) > 1:
@@ -3366,6 +3424,9 @@ def main():
                 res = purge_plugin_data()
                 print(json.dumps(res, indent=2))
                 sys.exit(0 if res["status"] == "success" else 1)
+            if arg == "--serve":
+                serve()
+                return
 
         ensure_config_exists()
         os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
@@ -3378,11 +3439,7 @@ def main():
                     raw_input = sys.argv[2] if len(sys.argv) > 2 else read_stdin_payload(MAX_CONFIG_BYTES)
                     if len(raw_input) > MAX_CONFIG_BYTES:
                         raise ValueError(f"Config payload exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
-                    new_config = json.loads(raw_input)
-                    if not isinstance(new_config, list):
-                        raise ValueError("Config must be a JSON array of calendar entries")
-                    save_calendars(new_config)
-                    print(json.dumps({"status": "success"}))
+                    print(json.dumps(save_config_command(json.loads(raw_input))))
                     sys.exit(0)
                 except Exception as e:
                     print(json.dumps({"status": "error", "message": str(e)}))

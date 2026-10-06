@@ -190,3 +190,31 @@ test("Model.dueNotifications sends each due reminder once", () => {
   assert.deepEqual(Model.dueNotifications(events, now, "staged", sent, () => "").map((d) => d.title),
                    ["Upcoming in 5m: Review"]);
 });
+
+test("Model.upcomingEvents flattens days with one heading each", () => {
+  const byDate = {
+    "2026-10-06": [{ id: "a", calendar: "Work" }, { id: "b", calendar: "Home" }],
+    "2026-10-08": [{ id: "c", calendar: "Home" }],
+    "2026-10-20": [{ id: "late" }],
+  };
+  const all = Model.upcomingEvents(byDate, "2026-10-06", 7);
+  assert.deepEqual(all.map((e) => [e.id, e.dayHeading || ""]), [["a", "2026-10-06"], ["b", ""], ["c", "2026-10-08"]]);
+  const home = Model.upcomingEvents(byDate, "2026-10-06", 7, (e) => e.calendar === "Home");
+  assert.deepEqual(home.map((e) => [e.id, e.dayHeading]), [["b", "2026-10-06"], ["c", "2026-10-08"]]);
+});
+
+test("Model.parseQuickAdd understands dates and times in English and French", () => {
+  const today = "2026-10-06"; // a Tuesday
+  const q = (text) => Model.parseQuickAdd(text, today);
+  assert.deepEqual(q("Lunch tomorrow 1pm"), { title: "Lunch", date: "2026-10-07", start: "13:00", end: "14:00" });
+  assert.deepEqual(q("Standup friday 9:30-9:45"), { title: "Standup", date: "2026-10-09", start: "09:30", end: "09:45" });
+  assert.deepEqual(q("Dentiste demain à 14h30"), { title: "Dentiste", date: "2026-10-07", start: "14:30", end: "15:30" });
+  assert.deepEqual(q("Call 1-2pm"), { title: "Call", date: "", start: "13:00", end: "14:00" });
+  assert.deepEqual(q("Gym tuesday at 7 for 90 min"), { title: "Gym", date: "2026-10-06", start: "07:00", end: "08:30" });
+  assert.deepEqual(q("Retro next tuesday 16h-17h"), { title: "Retro", date: "2026-10-13", start: "16:00", end: "17:00" });
+  assert.deepEqual(q("Review 2026-10-12"), { title: "Review", date: "2026-10-12", start: "", end: "" });
+  assert.deepEqual(q("Trip in 3 days"), { title: "Trip", date: "2026-10-09", start: "", end: "" });
+  // Numbers and short words that are not dates or times stay in the title.
+  assert.deepEqual(q("Lunch with Sam 2-3 people"), { title: "Lunch with Sam 2-3 people", date: "", start: "", end: "" });
+  assert.deepEqual(q("Read chapter 9"), { title: "Read chapter 9", date: "", start: "", end: "" });
+});

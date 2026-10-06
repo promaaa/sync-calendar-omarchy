@@ -34,6 +34,8 @@ Follows your Omarchy theme (the shots below are three different ones). Works wit
 - **Seamless Theming**: Dynamically inherits the active Omarchy or Shibumi bar colors, fonts, and styling.
 - **Multi-Calendar Sync**: Connect multiple calendar accounts and feeds with customizable per-calendar colors and easy enable/disable toggles.
 - **Interactive Month Grid**: Click any date to view scheduled events for that day.
+- **Next 7 Days**: The `7 days` pill (or `u`) lists the coming week, with a title per day. Click an event to read its description.
+- **Quick Add**: Type a sentence in the title field, such as `Lunch tomorrow 1pm-2pm`, `Standup friday 9:30-9:45` or `Dentiste demain 14h`, then press Enter. The plugin fills the date and times and keeps `Lunch` as the title. You still review and save the event.
 - **12/24-Hour Time Preference**: Switch the clock, agenda, notifications, and copied agenda times between 12-hour and 24-hour display.
 - **Visual Event Indicators**: Days with events show subtle colored dots corresponding to the calendar source.
 - **Fast & Non-Blocking**: Background multi-threaded event fetcher with zero UI freezes.
@@ -53,6 +55,7 @@ Follows your Omarchy theme (the shots below are three different ones). Works wit
 | `t` / `T` | **Today**: Jump to current date |
 | `n` / `N` or `Enter` | **New Event**: Open event creation modal for the selected date |
 | `y` / `Y` | **Copy Agenda**: Export day's events to clipboard as Markdown tasks |
+| `u` / `U` | **Agenda View**: Switch between the selected day and the next 7 days |
 | `r` / `R` | **Refresh & Sync**: Instant background calendar synchronization |
 | `w` / `W` | **Week Start**: Toggle Monday / Sunday week start |
 | `?` | **Shortcuts Help**: Toggle keyboard shortcuts cheatsheet modal |
@@ -100,6 +103,22 @@ duplicate clock.
 
 The calendar configuration and cached event paths remain under Omarchy's XDG
 directories because Shibumi runs inside the existing Omarchy Shell process.
+
+### Hyprland Key Bindings
+
+The panel answers IPC calls, so a key binding can open the event form or read the next event:
+
+```bash
+omarchy-shell promaa.clock addEvent                       # open the event form for today
+omarchy-shell promaa.clock quickAdd "Gym tomorrow 7am"    # open it filled from a sentence
+omarchy-shell promaa.clock nextEvent                      # print the next event, e.g. "14:30–15:00 Standup"
+```
+
+For example, in `~/.config/hypr/bindings.conf`:
+
+```
+bind = SUPER ALT, C, exec, omarchy-shell promaa.clock addEvent
+```
 
 ## Configuration
 

@@ -78,6 +78,10 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.toggle()
   }
 
+  function quickAdd(text) {
+    if (panelLoader.item) panelLoader.item.quickAdd(text)
+  }
+
   function toggleWeekStart() {
     if (panelLoader.item) panelLoader.item.toggleWeekStart()
   }
@@ -142,6 +146,9 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function addEvent(): void { root.quickAdd("") }
+    function quickAdd(text: string): void { root.quickAdd(text) }
+    function nextEvent(): string { return panelLoader.item ? panelLoader.item.nextEventSummary() : "" }
   }
 
   IpcHandler {
@@ -155,6 +162,9 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function addEvent(): void { root.quickAdd("") }
+    function quickAdd(text: string): void { root.quickAdd(text) }
+    function nextEvent(): string { return panelLoader.item ? panelLoader.item.nextEventSummary() : "" }
   }
 
   WidgetButton {

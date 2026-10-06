@@ -20,6 +20,8 @@ def load_script(name, filename):
 
 
 fetch_events = load_script("fetch_events", "fetch-events.py")
+# Keep the sync cache out of the real ~/.local/state.
+fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
 
 ICLOUD = {
     "name": "Apple iCloud",
@@ -375,20 +377,47 @@ END:VCALENDAR&#13;
 
     WINDOW = (fetch_events.datetime(2026, 9, 1), fetch_events.datetime(2026, 9, 30))
 
+    CTAG = """<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
+  <d:response><d:href>/1234/calendars/home/</d:href><d:propstat><d:prop>
+    <cs:getctag>{tag}</cs:getctag></d:prop></d:propstat></d:response>
+</d:multistatus>"""
+
+    def setUp(self):
+        self._cache = mock.patch.object(fetch_events, "SYNC_CACHE_DIR", tempfile.mkdtemp())
+        self._cache.start()
+        self.addCleanup(self._cache.stop)
+
     def test_caldav_only_entry_is_read_with_report(self):
         cal = {k: v for k, v in ICLOUD.items() if k != "url"}
-        sent, patch = capture_requests([FakeResponse(self.MULTISTATUS)])
+        sent, patch = capture_requests([FakeResponse(self.CTAG.format(tag="t1")), FakeResponse(self.MULTISTATUS)])
         with patch:
             result = fetch_events.fetch_calendar_item(cal, *self.WINDOW)
         self.assertEqual(result["status"], "ok")
         self.assertEqual([e["title"] for e in result["events"]], ["Lunch"])
         self.assertTrue(result["events"][0]["writable"])
-        self.assertEqual(sent[0].get_method(), "REPORT")
-        self.assertIn(b"time-range", sent[0].data)
+        self.assertEqual([r.get_method() for r in sent], ["PROPFIND", "REPORT"])
+        self.assertIn(b"time-range", sent[1].data)
+
+    def test_unchanged_ctag_skips_the_report(self):
+        cal = {k: v for k, v in ICLOUD.items() if k != "url"}
+        _, patch = capture_requests([FakeResponse(self.CTAG.format(tag="t1")), FakeResponse(self.MULTISTATUS)])
+        with patch:
+            fetch_events.fetch_calendar_item(cal, *self.WINDOW)
+        sent, patch = capture_requests([FakeResponse(self.CTAG.format(tag="t1"))])
+        with patch:
+            result = fetch_events.fetch_calendar_item(cal, *self.WINDOW)
+        self.assertEqual([r.get_method() for r in sent], ["PROPFIND"])
+        self.assertEqual([e["title"] for e in result["events"]], ["Lunch"])
+
+        sent, patch = capture_requests([FakeResponse(self.CTAG.format(tag="t2")), FakeResponse(self.MULTISTATUS)])
+        with patch:
+            fetch_events.fetch_calendar_item(cal, *self.WINDOW)
+        self.assertEqual([r.get_method() for r in sent], ["PROPFIND", "REPORT"])
 
     def test_failed_report_falls_back_to_the_published_feed(self):
         error = urllib.error.HTTPError(ICLOUD["caldavUrl"], 403, "Forbidden", {}, None)
-        _, patch = capture_requests([error])
+        _, patch = capture_requests([error, error])
         with patch, mock.patch.object(fetch_events, "fetch_calendar", return_value={"status": "ok"}) as feed:
             result = fetch_events.fetch_calendar_item(ICLOUD, *self.WINDOW)
         self.assertEqual(result, {"status": "ok"})

@@ -4,12 +4,15 @@ import importlib.util
 from datetime import datetime
 from pathlib import Path
 import itertools
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("fetch_events", ROOT / "fetch-events.py")
 fetch_events = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fetch_events)
+# Keep the sync cache out of the real ~/.local/state.
+fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
 
 try:
     from dateutil.rrule import rrulestr

@@ -20,6 +20,8 @@ def load_script(name, filename):
 
 
 fetch_events = load_script("fetch_events", "fetch-events.py")
+# Keep the sync cache out of the real ~/.local/state.
+fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
 google_auth = load_script("google_auth", "google-auth.py")
 
 

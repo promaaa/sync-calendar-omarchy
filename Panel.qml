@@ -49,7 +49,8 @@ Panel {
   readonly property string selectedDateLabel: Model.formatSelectedDateLabel(selectedDateKey, todayKey, Qt.locale())
   readonly property int configuredCalendarCount: eventsData.configuredCount || 0
   property double lastSyncTimestamp: 0
-  readonly property bool syncRunning: fetchProc.running
+  readonly property bool syncRunning: backend.busy && backend.current.key === "sync"
+  readonly property string backendScript: Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, "")
   readonly property bool notifyUpcomingEvents: root.setting("notifyUpcomingEvents", true)
   readonly property var notifyMinutesBefore: root.setting("notifyMinutesBefore", "staged")
   readonly property int syncIntervalMinutes: root.setting("syncIntervalMinutes", 15)
@@ -83,8 +84,6 @@ Panel {
   property string eventDescription: ""
   property bool eventSubmitting: false
   property string eventErrorMessage: ""
-  property string pendingEventPayloadJson: ""
-  property string pendingDeletePayloadJson: ""
   // The rendered event being edited, or null while the form adds a new one.
   property var editingEvent: null
   readonly property var writableCalendars: Model.getWritableCalendars(root.configuredCalendars)
@@ -205,13 +204,21 @@ Panel {
       payload.calendarType = editing.calendarType || "local"
     }
 
-    pendingEventPayloadJson = JSON.stringify(payload)
-    saveEventProc.command = [
-      "python3",
-      Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),
-      editing ? "--update-event" : "--create-event"
-    ]
-    saveEventProc.running = true
+    backend.enqueue({
+      command: ["python3", root.backendScript, editing ? "--update-event" : "--create-event"],
+      stdin: JSON.stringify(payload),
+      done: function(text) {
+        root.eventSubmitting = false
+        var result = null
+        try { result = JSON.parse(text) } catch (e) {}
+        if (!result || result.status !== "success") {
+          root.eventErrorMessage = (result && result.message) || "Could not save the event"
+        } else {
+          root.addingEvent = false
+        }
+        eventsFile.reload()
+      }
+    })
   }
 
   function deleteEvent(evt) {
@@ -222,13 +229,11 @@ Panel {
       calendarId: evt.calendarId || "",
       calendarType: evt.calendarType || "local"
     }
-    pendingDeletePayloadJson = JSON.stringify(payload)
-    deleteEventProc.command = [
-      "python3",
-      Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),
-      "--delete-event"
-    ]
-    deleteEventProc.running = true
+    backend.enqueue({
+      command: ["python3", root.backendScript, "--delete-event"],
+      stdin: JSON.stringify(payload),
+      done: function(text) { eventsFile.reload() }
+    })
   }
 
   // ---- Settings Menu State
@@ -248,7 +253,13 @@ Panel {
   property string formJmapUrl: ""
   property string formJmapToken: ""
   property string formColor: "#4285f4"
-  property string pendingConfigJson: ""
+  // The list waiting to be written. Edits made before the write ends start
+  // from it, not from the file on disk, so they do not undo each other.
+  property var pendingCalendars: null
+
+  function calendarList() {
+    return JSON.parse(JSON.stringify(root.pendingCalendars || root.configuredCalendars))
+  }
 
   function openSettings(tab) {
     showingShortcutsHelp = false
@@ -267,17 +278,22 @@ Panel {
   }
 
   function saveCalendars(list) {
-    pendingConfigJson = JSON.stringify(list, null, 2)
-    saveConfigProc.command = [
-      "python3",
-      Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, ""),
-      "--save-config"
-    ]
-    saveConfigProc.running = true
+    root.pendingCalendars = list
+    // One line: the backend reads the payload with readline().
+    backend.enqueue({
+      key: "config",
+      command: ["python3", root.backendScript, "--save-config"],
+      stdin: JSON.stringify(list),
+      done: function(text) {
+        if (!backend.hasWaiting("config")) root.pendingCalendars = null
+        configFile.reload()
+        root.syncCalendars(true)
+      }
+    })
   }
 
   function toggleCalendarEnabled(index) {
-    var list = JSON.parse(JSON.stringify(root.configuredCalendars))
+    var list = root.calendarList()
     if (index >= 0 && index < list.length) {
       list[index].enabled = list[index].enabled === false ? true : false
       saveCalendars(list)
@@ -285,7 +301,7 @@ Panel {
   }
 
   function removeCalendar(index) {
-    var list = JSON.parse(JSON.stringify(root.configuredCalendars))
+    var list = root.calendarList()
     if (index >= 0 && index < list.length) {
       list.splice(index, 1)
       saveCalendars(list)
@@ -293,7 +309,7 @@ Panel {
   }
 
   function cycleColorForCalendar(index) {
-    var list = JSON.parse(JSON.stringify(root.configuredCalendars))
+    var list = root.calendarList()
     if (index >= 0 && index < list.length) {
       list[index].color = Model.cycleCalendarColor(list[index].color)
       saveCalendars(list)
@@ -314,7 +330,7 @@ Panel {
 
   function commitNewCalendar() {
     if (!formName.trim()) return
-    var list = JSON.parse(JSON.stringify(root.configuredCalendars))
+    var list = root.calendarList()
     var item = {
       name: formName.trim(),
       color: formColor,
@@ -442,7 +458,14 @@ Panel {
     var now = Date.now()
     if (!force && (now - lastSyncTimestamp < 30000)) return
     lastSyncTimestamp = now
-    if (!fetchProc.running) fetchProc.running = true
+    backend.enqueue({
+      key: "sync",
+      command: ["python3", root.backendScript],
+      done: function(text) {
+        eventsFile.reload()
+        root.checkUpcomingNotifications()
+      }
+    })
   }
 
   function getNotificationStage(diffMin, noticeSetting) {
@@ -514,8 +537,9 @@ Panel {
     // most icon themes, and an unresolved name renders as a broken-image
     // placeholder. The glyph is the same literal U+F00ED character the panel
     // header already uses.
-    notifyProc.command = ["omarchy-notification-send", "--app-name", "Omarchy Calendar", "-g", "󰃭", "-u", "normal", String(title || "Omarchy Calendar"), String(body || "")]
-    notifyProc.running = true
+    notifyQueue.enqueue({
+      command: ["omarchy-notification-send", "--app-name", "Chronica", "-g", "󰃭", "-u", "normal", String(title || "Chronica"), String(body || "")]
+    })
   }
 
   function openExternalUrl(url) {
@@ -708,21 +732,10 @@ Panel {
     onFileChanged: root.syncCalendars(true)
   }
 
-  Process {
-    id: fetchProc
-    command: ["python3", Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, "")]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        eventsFile.reload()
-        root.checkUpcomingNotifications()
-      }
-    }
-  }
-
-  Process {
-    id: notifyProc
-  }
+  // Backend calls run one at a time: two writes at once could undo each
+  // other, and a running Process ignores a second start.
+  JobQueue { id: backend }
+  JobQueue { id: notifyQueue }
 
   Process {
     id: openUrlProc
@@ -730,60 +743,6 @@ Panel {
 
   Process {
     id: copyProc
-  }
-
-  Process {
-    id: saveConfigProc
-    stdinEnabled: true
-    onStarted: {
-      write(root.pendingConfigJson + "\n")
-    }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.pendingConfigJson = ""
-        configFile.reload()
-        root.syncCalendars(true)
-      }
-    }
-  }
-
-  Process {
-    id: saveEventProc
-    stdinEnabled: true
-    onStarted: {
-      write(root.pendingEventPayloadJson + "\n")
-    }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.eventSubmitting = false
-        root.pendingEventPayloadJson = ""
-        var result = null
-        try { result = JSON.parse(this.text) } catch (e) {}
-        if (!result || result.status !== "success") {
-          root.eventErrorMessage = (result && result.message) || "Could not create the event"
-        } else {
-          root.addingEvent = false
-        }
-        eventsFile.reload()
-      }
-    }
-  }
-
-  Process {
-    id: deleteEventProc
-    stdinEnabled: true
-    onStarted: {
-      write(root.pendingDeletePayloadJson + "\n")
-    }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.pendingDeletePayloadJson = ""
-        eventsFile.reload()
-      }
-    }
   }
 
   Process {

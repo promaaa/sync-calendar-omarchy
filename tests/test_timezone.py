@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import time
+import tempfile
 import unittest
 from unittest import mock
 
@@ -23,6 +24,8 @@ def load_script(name, filename):
 
 
 fetch_events = load_script("fetch_events", "fetch-events.py")
+# Keep the sync cache out of the real ~/.local/state.
+fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
 
 
 class TimezoneResolutionTests(unittest.TestCase):

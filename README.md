@@ -306,9 +306,13 @@ rm -f ~/.config/omarchy/calendars.json
 # Google OAuth2 credentials and refresh tokens
 rm -f ~/.local/state/omarchy/google-auth.json
 
-# Cached calendar event state and translation cache
+# Cached calendar event state, sync cache and translation cache
 rm -f ~/.local/state/omarchy/calendar-events.json
+rm -rf ~/.local/state/omarchy/sync-cache
 rm -f ~/.local/state/omarchy/translation-cache.json
+
+# Events of the offline local calendar
+rm -f ~/.local/state/omarchy/local-events.json
 rmdir ~/.local/state/omarchy 2>/dev/null || true
 ```
 

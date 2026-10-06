@@ -10,6 +10,7 @@ import sys
 import json
 import re
 import base64
+import hashlib
 import secrets
 import stat
 import time
@@ -46,6 +47,7 @@ MAX_ICAL_BYTES = 10 * 1024 * 1024   # 10 MB limit for calendar .ics content
 MAX_API_BYTES = 5 * 1024 * 1024     # 5 MB limit for API JSON responses
 MAX_CONFIG_BYTES = 1 * 1024 * 1024  # 1 MB limit for local config files
 MAX_OUTPUT_JSON_BYTES = 25 * 1024 * 1024  # 25 MB limit for generated event state
+MAX_CACHE_BYTES = 2 * MAX_ICAL_BYTES  # one cached feed, JSON-escaped
 MAX_RECURRENCE_ITERATIONS = 2000    # CPU-work ceiling for expanding recurrence rules
 MAX_EXPANDED_INSTANCES = 500        # Maximum instances generated per recurring/multiday event
 
@@ -251,6 +253,43 @@ def ensure_config_exists():
             }
         ]
         write_secure_json(CONFIG_PATH, sample, mode=0o600)
+
+
+# Feeds and API answers are reused while the server says nothing changed.
+SYNC_CACHE_DIR = os.path.join(STATE_DIR, "sync-cache")
+# Windowed queries read this far past the window, so a cached answer still
+# covers the window as it moves forward during the next days.
+SYNC_REFRESH_MARGIN = timedelta(days=7)
+
+
+def sync_cache_path(*parts):
+    """One cache file per calendar source; the name does not reveal the source."""
+    digest = hashlib.sha256("\0".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:32]
+    return os.path.join(SYNC_CACHE_DIR, digest + ".json")
+
+
+def sync_cache_load(path):
+    try:
+        data = safe_load_json(path, max_bytes=MAX_CACHE_BYTES)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def sync_cache_save(path, data):
+    # A failed write only costs a full download next time.
+    try:
+        os.makedirs(SYNC_CACHE_DIR, mode=0o700, exist_ok=True)
+        write_secure_json(path, data, max_bytes=MAX_CACHE_BYTES)
+    except Exception:
+        pass
+
+
+def sync_cache_drop(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def unfold_lines(raw_text):
@@ -1231,27 +1270,46 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
     base_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events?{params}"
 
     try:
+        # The list URL is the same all day, so its ETag lets Google answer
+        # 304 when nothing changed.
+        cache_path = sync_cache_path("google", cal_id)
+        cached = sync_cache_load(cache_path)
+        if cached.get("url") != base_url or not isinstance(cached.get("items"), list):
+            cached = {}
+
         items = []
         page_token = None
+        data = {}
         # A page holds at most 250 events: follow nextPageToken (bounded).
         for _ in range(20):
             url = base_url
+            headers = {"Authorization": f"Bearer {access_token}", "User-Agent": USER_AGENT}
             if page_token:
                 url += "&" + urllib.parse.urlencode({"pageToken": page_token})
-            req = urllib.request.Request(url, headers={
-                "Authorization": f"Bearer {access_token}",
-                "User-Agent": USER_AGENT,
-            })
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-                data = json.loads(raw.decode("utf-8"))
+            elif cached.get("etag"):
+                headers["If-None-Match"] = cached["etag"]
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+                    data = json.loads(raw.decode("utf-8"))
+                    etag = (getattr(resp, "headers", None) or {}).get("ETag")
+            except urllib.error.HTTPError as exc:
+                if exc.code != 304 or page_token:
+                    raise
+                items, data, etag = cached["items"], {"accessRole": cached.get("accessRole")}, None
+                break
             items.extend(data.get("items", []))
             page_token = data.get("nextPageToken")
             if not page_token:
+                # Only a one-page answer is cached: its ETag covers all of it.
+                if etag and len(items) == len(data.get("items", [])):
+                    sync_cache_save(cache_path, {"url": base_url, "etag": etag, "items": items,
+                                                 "accessRole": data.get("accessRole")})
                 break
 
         # Shared calendars can be read-only for this account.
-        writable = data.get("accessRole", "owner") in ("owner", "writer")
+        writable = (data.get("accessRole") or "owner") in ("owner", "writer")
         auto_translate = cal_info.get("translateKorean", False)
         events = []
 
@@ -1403,24 +1461,43 @@ def fetch_calendar(cal_info, window_start, window_end):
                 auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("ascii")
                 headers["Authorization"] = f"Basic {auth_b64}"
 
+            # Ask the server to answer 304 when the feed did not change.
+            cache_path = sync_cache_path("ics", url, username or "")
+            cached = sync_cache_load(cache_path)
+            if isinstance(cached.get("body"), str):
+                if cached.get("etag"):
+                    headers["If-None-Match"] = cached["etag"]
+                if cached.get("lastModified"):
+                    headers["If-Modified-Since"] = cached["lastModified"]
+
             req = urllib.request.Request(url, headers=headers)
             resp_content = None
-            last_error = None
             # Retry transient connection resets / throttling (common on Apple iCloud CalDAV)
             for attempt in range(2):
                 try:
                     with urllib.request.urlopen(req, timeout=12) as resp:
                         raw = safe_read_bytes(resp, max_bytes=MAX_ICAL_BYTES)
                         resp_content = raw.decode("utf-8", errors="ignore")
+                        resp_headers = getattr(resp, "headers", None) or {}
+                        etag = resp_headers.get("ETag")
+                        last_modified = resp_headers.get("Last-Modified")
+                    if etag or last_modified:
+                        sync_cache_save(cache_path, {"etag": etag, "lastModified": last_modified, "body": resp_content})
                     break
-                except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ConnectionError) as exc:
-                    last_error = exc
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 304 and isinstance(cached.get("body"), str):
+                        resp_content = cached["body"]
+                        break
+                    # A 4xx (wrong URL, wrong password) will not change on a retry.
+                    if attempt == 0 and (exc.code >= 500 or exc.code == 429):
+                        time.sleep(0.5)
+                        continue
+                    raise
+                except (urllib.error.URLError, TimeoutError, OSError, ConnectionError):
                     if attempt == 0:
                         time.sleep(0.5)
                         continue
                     raise
-            if resp_content is None and last_error:
-                raise last_error
             content = resp_content or ""
 
         events = parse_ics(content, cal_info, window_start, window_end)
@@ -1574,6 +1651,7 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
             "count": 0,
         }
 
+    cache_path = None
     try:
         session_url, trusted_origin = validate_jmap_https_url(session_url)
         opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(trusted_origin))
@@ -1583,117 +1661,114 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-
-        # Step 1: Session Discovery
-        req = urllib.request.Request(session_url, headers=headers, method="GET")
-        with open_trusted_jmap(opener, req, trusted_origin, timeout=12) as resp:
-            raw_session = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-            session_data = json.loads(raw_session.decode("utf-8"))
-
-        api_url = session_data.get("apiUrl")
-        if not api_url:
-            return {
-                "name": name,
-                "color": color,
-                "events": [],
-                "status": "error: no apiUrl in JMAP session response",
-                "count": 0,
-            }
-        api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
-
-        # Find account supporting calendars
-        accounts = session_data.get("accounts", {})
-        primary_accounts = session_data.get("primaryAccounts", {})
-        account_id = primary_accounts.get("urn:ietf:params:jmap:calendars")
-
-        if not account_id:
-            for acc_id, acc_val in accounts.items():
-                caps = acc_val.get("accountCapabilities", {})
-                if any("calendar" in k.lower() for k in caps.keys()):
-                    account_id = acc_id
-                    break
-
-        if not account_id and accounts:
-            account_id = next(iter(accounts.keys()))
-
-        if not account_id:
-            return {
-                "name": name,
-                "color": color,
-                "events": [],
-                "status": "error: no JMAP calendar account found",
-                "count": 0,
-            }
-
-        # Step 2: Query and Get Events
-        time_min = window_start.strftime("%Y-%m-%dT00:00:00Z")
-        time_max = window_end.strftime("%Y-%m-%dT23:59:59Z")
-
-        cal_filter = {
-            "after": time_min,
-            "before": time_max,
-        }
-
         cal_id = cal_info.get("jmapCalendarId") or cal_info.get("calendarId")
-        if cal_id and cal_id != "primary":
-            cal_filter["inCalendars"] = [cal_id]
+        cache_path = sync_cache_path("jmap", session_url, cal_id or "", hashlib.sha256(token.encode("utf-8")).hexdigest())
+        cached = sync_cache_load(cache_path)
 
-        jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
-        session_caps = session_data.get("capabilities", {})
-        for cap in session_caps:
-            if "calendar" in cap.lower() and cap not in jmap_using:
-                jmap_using.append(cap)
+        def jmap_call(api_url, using, method_calls):
+            body = json.dumps({"using": using, "methodCalls": method_calls}).encode("utf-8")
+            req = urllib.request.Request(api_url, data=body, headers=headers, method="POST")
+            with open_trusted_jmap(opener, req, trusted_origin, timeout=15) as resp:
+                raw_data = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+                return json.loads(raw_data.decode("utf-8")).get("methodResponses", [])
 
-        query_call = {
-            "accountId": account_id,
-            "filter": cal_filter,
-            "expandRecurrences": True,
-        }
+        # Step 1: Session Discovery. The session rarely changes: reuse it for a day.
+        if cached.get("apiUrl") and cached.get("accountId") and time.time() - cached.get("sessionAt", 0) < 86400:
+            api_url, account_id, jmap_using = cached["apiUrl"], cached["accountId"], cached["using"]
+            api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
+        else:
+            req = urllib.request.Request(session_url, headers=headers, method="GET")
+            with open_trusted_jmap(opener, req, trusted_origin, timeout=12) as resp:
+                raw_session = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+                session_data = json.loads(raw_session.decode("utf-8"))
 
-        payload = {
-            "using": jmap_using,
-            "methodCalls": [
-                [
-                    "CalendarEvent/query",
-                    query_call,
-                    "q0"
-                ],
-                [
-                    "CalendarEvent/get",
-                    {
-                        "accountId": account_id,
-                        "#ids": {
-                            "resultOf": "q0",
-                            "name": "CalendarEvent/query",
-                            "path": "/ids"
-                        }
-                    },
-                    "get0"
-                ]
-            ]
-        }
-
-        payload_bytes = json.dumps(payload).encode("utf-8")
-        post_req = urllib.request.Request(api_url, data=payload_bytes, headers=headers, method="POST")
-
-        with open_trusted_jmap(opener, post_req, trusted_origin, timeout=15) as resp:
-            raw_data = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-            response_data = json.loads(raw_data.decode("utf-8"))
-
-        method_responses = response_data.get("methodResponses", [])
-        raw_events = []
-        for resp_name, resp_args, resp_call_id in method_responses:
-            if resp_name == "CalendarEvent/get":
-                raw_events = resp_args.get("list", [])
-                break
-            elif resp_name == "error":
+            api_url = session_data.get("apiUrl")
+            if not api_url:
                 return {
                     "name": name,
                     "color": color,
                     "events": [],
-                    "status": f"jmap_error: {resp_args.get('type', 'unknown')}",
+                    "status": "error: no apiUrl in JMAP session response",
                     "count": 0,
                 }
+            api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
+
+            # Find account supporting calendars
+            accounts = session_data.get("accounts", {})
+            primary_accounts = session_data.get("primaryAccounts", {})
+            account_id = primary_accounts.get("urn:ietf:params:jmap:calendars")
+
+            if not account_id:
+                for acc_id, acc_val in accounts.items():
+                    caps = acc_val.get("accountCapabilities", {})
+                    if any("calendar" in k.lower() for k in caps.keys()):
+                        account_id = acc_id
+                        break
+
+            if not account_id and accounts:
+                account_id = next(iter(accounts.keys()))
+
+            if not account_id:
+                return {
+                    "name": name,
+                    "color": color,
+                    "events": [],
+                    "status": "error: no JMAP calendar account found",
+                    "count": 0,
+                }
+
+            jmap_using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"]
+            for cap in session_data.get("capabilities", {}):
+                if "calendar" in cap.lower() and cap not in jmap_using:
+                    jmap_using.append(cap)
+            cached = {"apiUrl": api_url, "accountId": account_id, "using": jmap_using, "sessionAt": time.time()}
+
+        # Step 2a: when no event changed since the last sync, its list still holds.
+        raw_events = None
+        if (cached.get("state") and isinstance(cached.get("list"), list)
+                and cached.get("start", "~") <= window_start.isoformat()
+                and cached.get("end", "") >= window_end.isoformat()):
+            changes = jmap_call(api_url, jmap_using, [
+                ["CalendarEvent/changes", {"accountId": account_id, "sinceState": cached["state"]}, "c0"],
+            ])
+            if changes and changes[0][0] == "CalendarEvent/changes":
+                delta = changes[0][1]
+                if not (delta.get("created") or delta.get("updated") or delta.get("destroyed") or delta.get("hasMoreChanges")):
+                    raw_events = cached["list"]
+
+        # Step 2b: Query and Get Events
+        if raw_events is None:
+            query_end = window_end + SYNC_REFRESH_MARGIN
+            cal_filter = {
+                "after": window_start.strftime("%Y-%m-%dT00:00:00Z"),
+                "before": query_end.strftime("%Y-%m-%dT23:59:59Z"),
+            }
+            if cal_id and cal_id != "primary":
+                cal_filter["inCalendars"] = [cal_id]
+
+            method_responses = jmap_call(api_url, jmap_using, [
+                ["CalendarEvent/query", {"accountId": account_id, "filter": cal_filter, "expandRecurrences": True}, "q0"],
+                ["CalendarEvent/get", {
+                    "accountId": account_id,
+                    "#ids": {"resultOf": "q0", "name": "CalendarEvent/query", "path": "/ids"},
+                }, "get0"],
+            ])
+            raw_events = []
+            for resp_name, resp_args, resp_call_id in method_responses:
+                if resp_name == "CalendarEvent/get":
+                    raw_events = resp_args.get("list", [])
+                    cached.update({"state": resp_args.get("state"), "list": raw_events,
+                                   "start": window_start.isoformat(), "end": query_end.isoformat()})
+                    break
+                elif resp_name == "error":
+                    return {
+                        "name": name,
+                        "color": color,
+                        "events": [],
+                        "status": f"jmap_error: {resp_args.get('type', 'unknown')}",
+                        "count": 0,
+                    }
+        sync_cache_save(cache_path, cached)
 
         # Step 3: Parse JSCalendar (RFC 8984) events
         auto_translate = cal_info.get("translateKorean", False)
@@ -1797,6 +1872,9 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
         }
 
     except urllib.error.HTTPError as e:
+        # A stale session (moved apiUrl, new token) must not stick around.
+        if cache_path:
+            sync_cache_drop(cache_path)
         status_msg = f"auth_failed ({e.code})" if e.code in (401, 403) else f"http_error ({e.code})"
         return {
             "name": name,
@@ -1806,6 +1884,8 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
             "count": 0,
         }
     except Exception as e:
+        if cache_path:
+            sync_cache_drop(cache_path)
         return {
             "name": name,
             "color": color,
@@ -1837,6 +1917,7 @@ def purge_plugin_data():
     - OUTPUT_PATH (~/.local/state/omarchy/calendar-events.json)
     - TRANSLATION_CACHE_PATH (~/.local/state/omarchy/translation-cache.json)
     - LOCAL_EVENTS_PATH (~/.local/state/omarchy/local-events.json)
+    - SYNC_CACHE_DIR (~/.local/state/omarchy/sync-cache/)
     """
     removed = []
     errors = []
@@ -1854,6 +1935,13 @@ def purge_plugin_data():
                 removed.append(target)
         except Exception as exc:
             errors.append(f"{target}: {exc}")
+
+    try:
+        if os.path.isdir(SYNC_CACHE_DIR) and not os.path.islink(SYNC_CACHE_DIR):
+            shutil.rmtree(SYNC_CACHE_DIR)
+            removed.append(SYNC_CACHE_DIR)
+    except Exception as exc:
+        errors.append(f"{SYNC_CACHE_DIR}: {exc}")
 
     try:
         if os.path.exists(STATE_DIR) and not os.listdir(STATE_DIR):
@@ -2687,6 +2775,10 @@ CALDAV_RANGE_QUERY = """<?xml version="1.0" encoding="utf-8"?>
 </c:calendar-query>"""
 
 
+CALDAV_TAG_PROPS = '<cs:getctag xmlns:cs="http://calendarserver.org/ns/"/><d:sync-token/>'
+CALDAV_TAG_NAMES = ("{http://calendarserver.org/ns/}getctag", "{DAV:}sync-token")
+
+
 def fetch_caldav_calendar(cal_info, window_start, window_end):
     """
     Read a CalDAV collection with one calendar-query REPORT over the window.
@@ -2703,15 +2795,34 @@ def fetch_caldav_calendar(cal_info, window_start, window_end):
         def utc(dt):
             return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-        body = CALDAV_RANGE_QUERY.format(ns=CALDAV_NS, start=utc(window_start), end=utc(window_end))
-        text, _ = caldav_request(
-            origin, auth, "REPORT", url, body,
-            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
-        )
-        tree = ET.fromstring(text)
-        content = "\r\n".join(
-            node.text for node in tree.iter(f"{{{CALDAV_NS}}}calendar-data") if node.text
-        )
+        # The collection's ctag / sync-token change whenever any event does:
+        # one small PROPFIND decides whether the full REPORT is needed.
+        cache_path = sync_cache_path("caldav", url, cal_info.get("username"))
+        cached = sync_cache_load(cache_path)
+        try:
+            tags = caldav_propfind(url, origin, auth, CALDAV_TAG_PROPS)
+            tag = "|".join((node.text or "").strip() for node in tags.iter()
+                           if node.tag in CALDAV_TAG_NAMES and (node.text or "").strip())
+        except Exception:
+            tag = ""
+        if (tag and cached.get("tag") == tag and isinstance(cached.get("content"), str)
+                and cached.get("start", "~") <= window_start.isoformat()
+                and cached.get("end", "") >= window_end.isoformat()):
+            content = cached["content"]
+        else:
+            query_end = window_end + SYNC_REFRESH_MARGIN
+            body = CALDAV_RANGE_QUERY.format(ns=CALDAV_NS, start=utc(window_start), end=utc(query_end))
+            text, _ = caldav_request(
+                origin, auth, "REPORT", url, body,
+                headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+            )
+            tree = ET.fromstring(text)
+            content = "\r\n".join(
+                node.text for node in tree.iter(f"{{{CALDAV_NS}}}calendar-data") if node.text
+            )
+            if tag:
+                sync_cache_save(cache_path, {"tag": tag, "start": window_start.isoformat(),
+                                             "end": query_end.isoformat(), "content": content})
         events = parse_ics(content, cal_info, window_start, window_end)
     except Exception as e:
         if str(cal_info.get("url") or "").strip():

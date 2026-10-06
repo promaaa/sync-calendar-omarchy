@@ -338,6 +338,16 @@ rmdir ~/.local/state/omarchy 2>/dev/null || true
 
 Contributions, bug reports, and suggestions are welcome. Feel free to open an issue or submit a pull request!
 
+Run the tests before a pull request (Python 3.9 or newer, Node 22 or newer):
+
+```bash
+python3 -m unittest discover -s tests
+node --test tests/test_model.js
+```
+
+With `python-dateutil` installed, `tests/test_rrule.py` also compares the
+recurrence engine with it. The plugin itself needs only the standard library.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

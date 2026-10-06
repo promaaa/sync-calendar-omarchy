@@ -496,57 +496,22 @@ Panel {
     })
   }
 
-  function getNotificationStage(diffMin, noticeSetting) {
-    var s = String(noticeSetting || "staged").toLowerCase()
-    if (s === "staged" || s === "0") {
-      if (diffMin <= 1 && diffMin >= 0) return 1
-      if (diffMin <= 5 && diffMin > 1) return 5
-      if (diffMin <= 10 && diffMin > 5) return 10
-      return null
-    }
-    var mins = parseInt(s, 10) || 10
-    if (diffMin >= 0 && diffMin <= mins) return mins
-    return null
-  }
-
   function checkUpcomingNotifications() {
     if (!root.notifyUpcomingEvents) return
     var nowMs = Date.now()
     // Include tomorrow: an event at 00:10 is due for a reminder before midnight.
     var tomorrow = new Date(nowMs + 86400000)
     var tomorrowKey = Model.dateKey(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate())
-    var todayEvents = (root.eventsByDate[root.todayKey] || []).concat(root.eventsByDate[tomorrowKey] || [])
-    var settingVal = root.notifyMinutesBefore
-
-    for (var i = 0; i < todayEvents.length; i++) {
-      var evt = todayEvents[i]
-      if (evt.allDay || !evt.startIso) continue
-      var startMs = new Date(evt.startIso).getTime()
-      if (isNaN(startMs)) continue
-      var diffMin = Math.round((startMs - nowMs) / 60000)
-      if (diffMin < 0 || diffMin > 35) continue
-
-      var stage = root.getNotificationStage(diffMin, settingVal)
-      if (stage !== null) {
-        var key = evt.id + "_" + evt.startIso + "_" + stage
-        if (!root.notifiedEventKeys[key]) {
-          var updated = Object.assign({}, root.notifiedEventKeys)
-          updated[key] = true
-          root.notifiedEventKeys = updated
-
-          var stagePrefix = diffMin <= 1 ? "Starting now: " : ("Upcoming in " + diffMin + "m: ")
-          var titleStr = stagePrefix + evt.title
-          var bodyParts = []
-          if (evt.calendar) bodyParts.push("[" + evt.calendar + "]")
-          if (evt.startTime) bodyParts.push(root.eventTimeRange(evt, " - "))
-          if (evt.meetingProvider) bodyParts.push("📹 " + evt.meetingProvider)
-          else if (evt.location) bodyParts.push("📍 " + evt.location)
-          var bodyStr = bodyParts.join("  ·  ")
-
-          root.sendDesktopNotification(titleStr, bodyStr)
-        }
-      }
+    var events = (root.eventsByDate[root.todayKey] || []).concat(root.eventsByDate[tomorrowKey] || [])
+    var due = Model.dueNotifications(events, nowMs, root.notifyMinutesBefore, root.notifiedEventKeys,
+                                     function(evt) { return root.eventTimeRange(evt, " - ") })
+    if (due.length === 0) return
+    var updated = Object.assign({}, root.notifiedEventKeys)
+    for (var i = 0; i < due.length; i++) {
+      updated[due[i].key] = true
+      root.sendDesktopNotification(due[i].title, due[i].body)
     }
+    root.notifiedEventKeys = updated
   }
 
   function copyAgendaMarkdown() {
@@ -1996,30 +1961,13 @@ Panel {
                     spacing: Style.space(8)
 
                     // All Day Toggle
-                    Rectangle {
-                      width: allDayPillText.implicitWidth + Style.space(14)
+                    ChoicePill {
                       height: Style.space(24)
-                      radius: Style.cornerRadius > 0 ? height / 2 : 0
-                      color: root.eventAllDay ? Color.accent : "transparent"
-                      border.width: 1
-                      border.color: root.eventAllDay ? Color.accent : Qt.darker(root.contentForeground, 1.8)
-
-                      Text {
-                        textFormat: Text.PlainText
-                        id: allDayPillText
-                        anchors.centerIn: parent
-                        text: "All Day"
-                        color: root.eventAllDay ? Color.background : root.contentForeground
-                        font.family: root.contentFontFamily
-                        font.pixelSize: Style.font.caption
-                        font.bold: root.eventAllDay
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.eventAllDay = !root.eventAllDay
-                      }
+                      text: "All Day"
+                      selected: root.eventAllDay
+                      foreground: root.contentForeground
+                      fontFamily: root.contentFontFamily
+                      onClicked: root.eventAllDay = !root.eventAllDay
                     }
 
                     // Start Time Input
@@ -3304,33 +3252,14 @@ Panel {
                       { label: "24-hour", value: 24 }
                     ]
 
-                    Rectangle {
+                    ChoicePill {
                       id: clockFormatPill
                       required property var modelData
-                      readonly property bool isSelected: root.clockHourCycle === modelData.value
-                      width: clockFormatText.implicitWidth + Style.space(14)
-                      height: Style.space(22)
-                      radius: Style.cornerRadius > 0 ? height / 2 : 0
-                      color: isSelected ? Color.accent : "transparent"
-                      border.width: 1
-                      border.color: isSelected ? Color.accent : Qt.darker(root.contentForeground, 1.8)
-
-                      Text {
-                        textFormat: Text.PlainText
-                        id: clockFormatText
-                        anchors.centerIn: parent
-                        text: clockFormatPill.modelData.label
-                        color: clockFormatPill.isSelected ? Color.background : root.contentForeground
-                        font.family: root.contentFontFamily
-                        font.pixelSize: Style.font.caption
-                        font.bold: clockFormatPill.isSelected
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.setClockHourCycle(clockFormatPill.modelData.value)
-                      }
+                      text: clockFormatPill.modelData.label
+                      selected: root.clockHourCycle === clockFormatPill.modelData.value
+                      foreground: root.contentForeground
+                      fontFamily: root.contentFontFamily
+                      onClicked: root.setClockHourCycle(clockFormatPill.modelData.value)
                     }
                   }
                 }
@@ -3384,32 +3313,14 @@ Panel {
                       { label: "Manual", value: 0 }
                     ]
 
-                    Rectangle {
+                    ChoicePill {
                       id: syncOptPill
                       required property var modelData
-                      width: syncOptText.implicitWidth + Style.space(14)
-                      height: Style.space(22)
-                      radius: Style.cornerRadius > 0 ? height / 2 : 0
-                      color: root.syncIntervalMinutes === modelData.value ? Color.accent : "transparent"
-                      border.width: 1
-                      border.color: root.syncIntervalMinutes === modelData.value ? Color.accent : Qt.darker(root.contentForeground, 1.8)
-
-                      Text {
-                        textFormat: Text.PlainText
-                        id: syncOptText
-                        anchors.centerIn: parent
-                        text: syncOptPill.modelData.label
-                        color: root.syncIntervalMinutes === syncOptPill.modelData.value ? Color.background : root.contentForeground
-                        font.family: root.contentFontFamily
-                        font.pixelSize: Style.font.caption
-                        font.bold: root.syncIntervalMinutes === syncOptPill.modelData.value
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.persistSettings({ syncIntervalMinutes: syncOptPill.modelData.value })
-                      }
+                      text: syncOptPill.modelData.label
+                      selected: root.syncIntervalMinutes === syncOptPill.modelData.value
+                      foreground: root.contentForeground
+                      fontFamily: root.contentFontFamily
+                      onClicked: root.persistSettings({ syncIntervalMinutes: syncOptPill.modelData.value })
                     }
                   }
                 }
@@ -3484,33 +3395,14 @@ Panel {
                       { label: "30 min", value: 30 }
                     ]
 
-                    Rectangle {
+                    ChoicePill {
                       id: timingPill
                       required property var modelData
-                      readonly property bool isSelected: String(root.notifyMinutesBefore) === String(modelData.value)
-                      width: timingText.implicitWidth + Style.space(14)
-                      height: Style.space(22)
-                      radius: Style.cornerRadius > 0 ? height / 2 : 0
-                      color: isSelected ? Color.accent : "transparent"
-                      border.width: 1
-                      border.color: isSelected ? Color.accent : Qt.darker(root.contentForeground, 1.8)
-
-                      Text {
-                        textFormat: Text.PlainText
-                        id: timingText
-                        anchors.centerIn: parent
-                        text: timingPill.modelData.label
-                        color: timingPill.isSelected ? Color.background : root.contentForeground
-                        font.family: root.contentFontFamily
-                        font.pixelSize: Style.font.caption
-                        font.bold: timingPill.isSelected
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.persistSettings({ notifyMinutesBefore: timingPill.modelData.value })
-                      }
+                      text: timingPill.modelData.label
+                      selected: String(root.notifyMinutesBefore) === String(timingPill.modelData.value)
+                      foreground: root.contentForeground
+                      fontFamily: root.contentFontFamily
+                      onClicked: root.persistSettings({ notifyMinutesBefore: timingPill.modelData.value })
                     }
                   }
                 }
@@ -3612,56 +3504,20 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(4)
 
-                  Rectangle {
-                    width: monText.implicitWidth + Style.space(14)
-                    height: Style.space(22)
-                    radius: Style.cornerRadius > 0 ? height / 2 : 0
-                    color: root.weekStart === 1 ? Color.accent : "transparent"
-                    border.width: 1
-                    border.color: root.weekStart === 1 ? Color.accent : Qt.darker(root.contentForeground, 1.8)
-
-                    Text {
-                      textFormat: Text.PlainText
-                      id: monText
-                      anchors.centerIn: parent
-                      text: "Monday"
-                      color: root.weekStart === 1 ? Color.background : root.contentForeground
-                      font.family: root.contentFontFamily
-                      font.pixelSize: Style.font.caption
-                      font.bold: root.weekStart === 1
-                    }
-
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.setWeekStart(1)
-                    }
+                  ChoicePill {
+                    text: "Monday"
+                    selected: root.weekStart === 1
+                    foreground: root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    onClicked: root.setWeekStart(1)
                   }
 
-                  Rectangle {
-                    width: sunText.implicitWidth + Style.space(14)
-                    height: Style.space(22)
-                    radius: Style.cornerRadius > 0 ? height / 2 : 0
-                    color: root.weekStart === 0 ? Color.accent : "transparent"
-                    border.width: 1
-                    border.color: root.weekStart === 0 ? Color.accent : Qt.darker(root.contentForeground, 1.8)
-
-                    Text {
-                      textFormat: Text.PlainText
-                      id: sunText
-                      anchors.centerIn: parent
-                      text: "Sunday"
-                      color: root.weekStart === 0 ? Color.background : root.contentForeground
-                      font.family: root.contentFontFamily
-                      font.pixelSize: Style.font.caption
-                      font.bold: root.weekStart === 0
-                    }
-
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.setWeekStart(0)
-                    }
+                  ChoicePill {
+                    text: "Sunday"
+                    selected: root.weekStart === 0
+                    foreground: root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    onClicked: root.setWeekStart(0)
                   }
                 }
               }

@@ -1948,27 +1948,6 @@ TIMETREE_BASE_URL = "https://timetreeapp.com/api/v1"
 TIMETREE_AUTH_URL = f"{TIMETREE_BASE_URL}/auth/email/signin"
 TIMETREE_HOME_URL = "https://timetreeapp.com/"
 TIMETREE_HEADERS = {"Content-Type": "application/json", "X-Timetreea": "web/2.1.0/en"}
-# The password never touches calendars.json: it lives only in the system
-# keyring (libsecret), looked up by this helper on demand. See bin/omarchy-calendar-secret.
-TIMETREE_SECRET_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "omarchy-calendar-secret")
-
-
-def timetree_secret_lookup(email):
-    """Read the TimeTree password for `email` from the system keyring, or None."""
-    email = (email or "").strip()
-    if not email:
-        return None
-    try:
-        proc = subprocess.run(
-            [TIMETREE_SECRET_HELPER, "lookup", email],
-            capture_output=True, timeout=12,
-        )
-        if proc.returncode != 0:
-            return None
-        password = proc.stdout.decode("utf-8", "replace")
-        return password if password else None
-    except Exception:
-        return None
 
 
 def timetree_credentials(cal_info):
@@ -1976,10 +1955,10 @@ def timetree_credentials(cal_info):
     email = str(cal_info.get("email") or "").strip()
     if not email:
         raise ValueError(f"Calendar '{cal_info.get('name')}' has no TimeTree email configured")
-    password = timetree_secret_lookup(email)
-    if not password:
+    password = cal_info.get("password")
+    if not password or password == KEYRING_MARK:
         raise ValueError(
-            f"No TimeTree password stored in the system keyring for {email} - remove and re-add the calendar"
+            f"No TimeTree password available for {email} - remove and re-add the calendar"
         )
     return email, password
 

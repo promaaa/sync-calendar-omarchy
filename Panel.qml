@@ -325,11 +325,6 @@ Panel {
     root.agendaMode = root.agendaMode === "upcoming" ? "day" : "upcoming"
     root.expandedEventKey = ""
   }
-  // Set while storeTimetreeSecretProc is writing the password to the keyring;
-  // the calendar entry itself is only appended to calendars.json once that
-  // succeeds, so a failed keyring write never leaves a passwordless entry behind.
-  property string pendingTimetreeItemJson: ""
-  property string timetreeSecretError: ""
 
   function openSettings(tab) {
     showingShortcutsHelp = false
@@ -394,7 +389,6 @@ Panel {
     formTimetreeEmail = ""
     formTimetreePassword = ""
     formTimetreeCalendarId = ""
-    timetreeSecretError = ""
     formColor = formType === "googleId" ? "#e01b24" : (formType === "jmap" ? "#ff7700" : (formType === "local" ? "#a6e3a1" : (formType === "timetree" ? "#4a6cf7" : "#4285f4")))
     addingCalendar = true
     if (calendarScroll) calendarScroll.contentY = 0
@@ -402,34 +396,6 @@ Panel {
 
   function commitNewCalendar() {
     if (!formName.trim()) return
-
-    // TimeTree's password never lands in calendars.json: it goes to the
-    // system keyring first, and the calendar entry is only appended once
-    // that write is confirmed. See storeTimetreeSecretProc below.
-    if (formType === "timetree") {
-      if (!formTimetreeEmail.trim() || !formTimetreePassword || !formTimetreeCalendarId.trim()) return
-      timetreeSecretError = ""
-      var ttItem = {
-        name: formName.trim(),
-        color: formColor,
-        enabled: true,
-        type: "timetree",
-        email: formTimetreeEmail.trim(),
-        calendarId: formTimetreeCalendarId.trim()
-      }
-      pendingTimetreeItemJson = JSON.stringify(ttItem)
-      storeTimetreeSecretProc.pendingPassword = formTimetreePassword
-      storeTimetreeSecretProc.command = [
-        Qt.resolvedUrl("bin/omarchy-calendar-secret").toString().replace(/^file:\/\//, ""),
-        "store",
-        ttItem.email,
-        "TimeTree: " + ttItem.email
-      ]
-      storeTimetreeSecretProc.launched = false
-      storeTimetreeSecretProc.stdinEnabled = true
-      storeTimetreeSecretProc.running = true
-      return
-    }
 
     var list = root.calendarList()
     var item = {
@@ -450,12 +416,19 @@ Panel {
       }
     } else if (formType === "local") {
       item.type = "local"
+    } else if (formType === "timetree") {
+      if (!formTimetreeEmail.trim() || !formTimetreePassword || !formTimetreeCalendarId.trim()) return
+      item.type = "timetree"
+      item.email = formTimetreeEmail.trim()
+      item.password = formTimetreePassword
+      item.calendarId = formTimetreeCalendarId.trim()
     } else {
       if (!formAddress.trim()) return
       item.url = formAddress.trim()
     }
     list.push(item)
     saveCalendars(list)
+    formTimetreePassword = ""
     addingCalendar = false
   }
 
@@ -822,50 +795,6 @@ Panel {
 
   Process {
     id: copyProc
-  }
-
-  Process {
-  // Writes the TimeTree password to the system keyring (libsecret) before the
-  // calendar entry itself is ever saved to calendars.json, mirroring
-  // io.github.cahva.rdp-manager's own secret-store Process. The password
-  // travels only over this stdin pipe, never as an argv element, so it never
-  // shows up in `ps`. stdinEnabled must be flipped back to true before every
-  // run: onStarted's write() is a no-op once a previous run has closed stdin,
-  // which would otherwise leave later saves silently blocked on secret-tool
-  // until it times out.
-  Process {
-    id: storeTimetreeSecretProc
-    property string pendingPassword: ""
-    property bool launched: false
-    stdinEnabled: true
-    onRunningChanged: {
-      if (running || launched) return
-      pendingPassword = ""
-      root.pendingTimetreeItemJson = ""
-      root.timetreeSecretError = "Could not run the keyring helper — check bin/ is executable"
-    }
-    onStarted: {
-      launched = true
-      write(pendingPassword)
-      stdinEnabled = false
-      pendingPassword = ""
-    }
-    onExited: function(exitCode) {
-      pendingPassword = ""
-      if (exitCode === 0 && root.pendingTimetreeItemJson) {
-        var list = root.calendarList()
-        list.push(JSON.parse(root.pendingTimetreeItemJson))
-        root.pendingTimetreeItemJson = ""
-        root.formTimetreePassword = ""
-        root.saveCalendars(list)
-        root.addingCalendar = false
-      } else {
-        root.pendingTimetreeItemJson = ""
-        root.timetreeSecretError = exitCode === 124
-          ? "Timed out saving to the keyring — is it unlocked?"
-          : "Could not save the password to the keyring"
-      }
-    }
   }
 
   Process {
@@ -3110,8 +3039,7 @@ Panel {
                 onTextChanged: root.formTimetreeEmail = text
               }
 
-              // TimeTree Password Field (TimeTree only) - stored in the system
-              // keyring on submit, never written to calendars.json.
+              // TimeTree Password Field (TimeTree only)
               TextField {
                 id: calTimetreePasswordInput
                 visible: root.formType === "timetree"
@@ -3134,18 +3062,6 @@ Panel {
                 foreground: root.contentForeground
                 font.family: root.contentFontFamily
                 onTextChanged: root.formTimetreeCalendarId = text
-              }
-
-              // TimeTree keyring error (TimeTree only)
-              Text {
-                textFormat: Text.PlainText
-                visible: root.formType === "timetree" && root.timetreeSecretError.length > 0
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: root.timetreeSecretError
-                color: Color.accent
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
               }
 
               // Address / ID Field (not needed for Local or TimeTree)

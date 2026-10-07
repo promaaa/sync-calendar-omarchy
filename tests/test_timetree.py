@@ -64,5 +64,31 @@ class TimeTreeAllDayTest(unittest.TestCase):
         self.assertEqual([e["date_key"] for e in result["events"]], ["2026-10-06"])
 
 
+class TimeTreeSecretTest(unittest.TestCase):
+    def test_password_is_moved_to_the_keyring_and_read_back(self):
+        store = {}
+
+        def fake_secret_tool(args, value=None):
+            key = tuple(args[args.index("secret-id"):])
+            if args[0] == "store":
+                store[key] = value
+                return ""
+            if args[0] == "lookup":
+                return store.get(key)
+            return None
+
+        entry = dict(CAL, password="hunter2")
+        with mock.patch.object(fetch_events, "_secret_tool", fake_secret_tool):
+            fetch_events.stash_secrets(entry, fetch_events.CALENDAR_SECRET_FIELDS)
+            self.assertEqual(entry["password"], fetch_events.KEYRING_MARK)
+            revealed = fetch_events.reveal_secrets(entry, fetch_events.CALENDAR_SECRET_FIELDS)
+        self.assertEqual(fetch_events.timetree_credentials(revealed), ("a@example.com", "hunter2"))
+
+    def test_unrevealed_password_is_rejected(self):
+        entry = dict(CAL, password=fetch_events.KEYRING_MARK)
+        with self.assertRaises(ValueError):
+            fetch_events.timetree_credentials(entry)
+
+
 if __name__ == "__main__":
     unittest.main()

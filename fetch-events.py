@@ -2022,88 +2022,150 @@ def timetree_login(email, password):
     return session_cookie, csrf_token
 
 
+def timetree_cache_path(calendar_id):
+    """Local cache of raw TimeTree event records plus the last sync cursor."""
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(calendar_id))
+    return os.path.join(STATE_DIR, f"timetree-sync-{safe_id}.json")
+
+
 def fetch_timetree_calendar(cal_info, window_start, window_end):
-    """Fetch events from a TimeTree calendar via its private web API."""
+    """
+    Fetch events from a TimeTree calendar via its private web API.
+
+    `since=0` returns the newest changes first (`updated_at` descending); the
+    `since` field in the response is a cursor for the NEXT OLDER page, not a
+    forward delta filter. Paginating to `chunk: false` walks all the way back
+    to the calendar's very first change, so persisting that final cursor and
+    replaying it next time always lands back on the same "oldest point" with
+    0 events forever. Incremental syncs instead always restart at `since=0`
+    and stop as soon as a page's oldest item is older than the previous run's
+    high-water mark (the largest `updated_at` seen so far) — everything past
+    that point is already cached.
+    """
     name = cal_info.get("name", "TimeTree")
     color = cal_info.get("color", "#4a6cf7")
     calendar_id = str(cal_info.get("calendarId") or "").strip()
     if not calendar_id:
         return {"name": name, "color": color, "events": [], "status": "no_calendar_id", "count": 0}
 
+    cache_path = timetree_cache_path(calendar_id)
+    try:
+        cache = safe_load_json(cache_path, max_bytes=MAX_OUTPUT_JSON_BYTES)
+    except Exception:
+        cache = None
+    if not isinstance(cache, dict):
+        cache = {}
+    high_water = int(cache.get("since") or 0)
+    raw_events = cache.get("events")
+    raw_events = dict(raw_events) if isinstance(raw_events, dict) else {}
+
+    status = "ok"
     try:
         email, password = timetree_credentials(cal_info)
         session_cookie, _ = timetree_login(email, password)
 
-        url = f"{TIMETREE_BASE_URL}/calendar/{urllib.parse.quote(calendar_id, safe='')}/events/sync?since=0"
-        req = urllib.request.Request(url, headers={
-            **TIMETREE_HEADERS,
-            "User-Agent": USER_AGENT,
-            "Cookie": f"_session_id={session_cookie}",
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
-            data = json.loads(raw.decode("utf-8"))
+        cursor = 0
+        previous_high_water = high_water
+        for _ in range(50):  # safety cap on paginated chunks per sync
+            url = f"{TIMETREE_BASE_URL}/calendar/{urllib.parse.quote(calendar_id, safe='')}/events/sync?since={cursor}"
+            req = urllib.request.Request(url, headers={
+                **TIMETREE_HEADERS,
+                "User-Agent": USER_AGENT,
+                "Cookie": f"_session_id={session_cookie}",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = safe_read_bytes(resp, max_bytes=MAX_API_BYTES)
+                data = json.loads(raw.decode("utf-8"))
 
-        auto_translate = cal_info.get("translateKorean", False)
-        events = []
-        for item in data.get("events", []):
-            if item.get("deleted_at"):
-                continue
+            page_events = data.get("events", [])
+            for item in page_events:
+                uid = str(item.get("uuid") or "")
+                if not uid:
+                    continue
+                if item.get("deleted_at"):
+                    raw_events.pop(uid, None)
+                else:
+                    raw_events[uid] = item
+                high_water = max(high_water, int(item.get("updated_at") or 0))
 
-            start_ms = item.get("start_at")
-            if start_ms is None:
-                continue
-            end_ms = item.get("end_at")
-            all_day = bool(item.get("all_day"))
-            start_dt = datetime.fromtimestamp(start_ms / 1000)
-            end_dt = datetime.fromtimestamp(end_ms / 1000) if end_ms is not None else start_dt + timedelta(hours=1)
+            cursor = data.get("since", cursor)
+            oldest_in_page = min((int(e.get("updated_at") or 0) for e in page_events), default=None)
+            if oldest_in_page is not None and oldest_in_page <= previous_high_water:
+                break
+            if not data.get("chunk"):
+                break
 
-            title = item.get("title") or "(Untitled Event)"
-            location = item.get("location") or ""
-            description = item.get("note") or ""
-
-            if auto_translate:
-                title = translate_korean_to_english(title)
-                location = translate_korean_to_english(location)
-
-            meeting_url, meeting_provider = extract_meeting_info(location, description, title)
-            if not meeting_url and item.get("url"):
-                u = validate_meeting_url(item.get("url"))
-                if u:
-                    meeting_url, meeting_provider = u, "Meeting"
-
-            evt = {
-                "id": item.get("uuid", f"tt_{int(start_dt.timestamp())}"),
-                "title": title,
-                "location": location,
-                "description": description,
-                "calendar": name,
-                "calendarId": calendar_id,
-                "calendarType": "timetree",
-                "writable": True,
-                "color": color,
-                "all_day": all_day,
-                "start_dt": start_dt,
-                "end_dt": end_dt,
-                "date_key": start_dt.strftime("%Y-%m-%d"),
-                "meetingUrl": meeting_url or "",
-                "meetingProvider": meeting_provider or "",
-                "rrule": None,
-                "exdates": [],
+        write_secure_json(cache_path, {"since": high_water, "events": raw_events}, mode=0o600, max_bytes=MAX_OUTPUT_JSON_BYTES)
+    except Exception as e:
+        status = f"error: {str(e)}"
+        # A failed refresh still serves the last successfully cached sync, so
+        # one flaky login or request doesn't blank the calendar until the next
+        # interval succeeds.
+        if not raw_events:
+            return {
+                "name": name, "color": color, "type": "timetree", "writable": True,
+                "events": [], "status": status, "count": 0,
             }
 
-            multidays = expand_multiday_event(evt, window_start, window_end)
-            events.extend(multidays)
+    auto_translate = cal_info.get("translateKorean", False)
+    events = []
+    for item in raw_events.values():
+        start_ms = item.get("start_at")
+        if start_ms is None:
+            continue
+        end_ms = item.get("end_at")
+        all_day = bool(item.get("all_day"))
+        start_dt = datetime.fromtimestamp(start_ms / 1000)
+        end_dt = datetime.fromtimestamp(end_ms / 1000) if end_ms is not None else start_dt + timedelta(hours=1)
 
-        return {
-            "name": name, "color": color, "type": "timetree", "writable": True,
-            "events": events, "status": "ok", "count": len(events),
+        # TimeTree's sync API has no server-side date filter (unlike Google/JMAP),
+        # and expand_multiday_event only clamps multi-day spans to the window —
+        # a single-day event outside it would otherwise pass through unfiltered.
+        if end_dt.date() < window_start.date() or start_dt.date() > window_end.date():
+            continue
+
+        title = item.get("title") or "(Untitled Event)"
+        location = item.get("location") or ""
+        description = item.get("note") or ""
+
+        if auto_translate:
+            title = translate_korean_to_english(title)
+            location = translate_korean_to_english(location)
+
+        meeting_url, meeting_provider = extract_meeting_info(location, description, title)
+        if not meeting_url and item.get("url"):
+            u = validate_meeting_url(item.get("url"))
+            if u:
+                meeting_url, meeting_provider = u, "Meeting"
+
+        evt = {
+            "id": item.get("uuid", f"tt_{int(start_dt.timestamp())}"),
+            "title": title,
+            "location": location,
+            "description": description,
+            "calendar": name,
+            "calendarId": calendar_id,
+            "calendarType": "timetree",
+            "writable": True,
+            "color": color,
+            "all_day": all_day,
+            "start_dt": start_dt,
+            # TimeTree 종일 end_at은 마지막 날 포함, expand_multiday_event는 DTEND 배타 기준
+            "end_dt": end_dt + timedelta(days=1) if all_day else end_dt,
+            "date_key": start_dt.strftime("%Y-%m-%d"),
+            "meetingUrl": meeting_url or "",
+            "meetingProvider": meeting_provider or "",
+            "rrule": None,
+            "exdates": [],
         }
-    except Exception as e:
-        return {
-            "name": name, "color": color, "type": "timetree", "writable": True,
-            "events": [], "status": f"error: {str(e)}", "count": 0,
-        }
+
+        multidays = expand_multiday_event(evt, window_start, window_end)
+        events.extend(multidays)
+
+    return {
+        "name": name, "color": color, "type": "timetree", "writable": True,
+        "events": events, "status": status, "count": len(events),
+    }
 
 
 def create_timetree_event(cal_info, event_data):

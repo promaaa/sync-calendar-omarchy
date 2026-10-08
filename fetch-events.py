@@ -3108,6 +3108,18 @@ def caldav_prop_href(tree, tag, base):
     return None
 
 
+def caldav_follow_icloud(url, origin):
+    """iCloud answers on caldav.icloud.com but keeps each account on a pNN-caldav.icloud.com
+    host, so discovery may move between iCloud hosts. Any other host change keeps the old
+    origin, and the next request refuses it before the password is sent."""
+    new_origin = validate_jmap_https_url(url, label="CalDAV")[1]
+
+    def icloud(o):
+        return o[1] == "icloud.com" or o[1].endswith(".icloud.com")
+
+    return new_origin if icloud(origin) and icloud(new_origin) else origin
+
+
 def caldav_discover(cal_info):
     """List an account's calendar collections, for pasting into "caldavUrl"."""
     base = str(cal_info.get("caldavUrl") or "").strip() or CALDAV_DEFAULT_HOST
@@ -3119,12 +3131,14 @@ def caldav_discover(cal_info):
         )
         if not principal:
             raise ValueError("Server returned no user principal - check the username and password.")
+        origin = caldav_follow_icloud(principal, origin)
         home = caldav_prop_href(
             caldav_propfind(principal, origin, auth, "<c:calendar-home-set/>"),
             "{%s}calendar-home-set" % CALDAV_NS, principal,
         )
         if not home:
             raise ValueError("Server returned no calendar home for this account.")
+        origin = caldav_follow_icloud(home, origin)
         tree = caldav_propfind(home, origin, auth, "<d:displayname/><d:resourcetype/>", depth="1")
     except urllib.error.HTTPError as exc:
         raise ValueError(caldav_error(exc, cal_info)) from exc

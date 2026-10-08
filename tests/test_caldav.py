@@ -263,6 +263,53 @@ class CaldavDiscoveryTests(unittest.TestCase):
             [{"name": "Work", "caldavUrl": "https://p01-caldav.icloud.com/1234/calendars/work/"}],
         )
 
+    def test_discovery_across_partition_hosts(self):
+        cal = {"name": "Apple iCloud", "username": "user", "password": "pass"}
+        principal = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response>
+            <d:href>/1234/principal/</d:href>
+            <d:propstat><d:status>HTTP/1.1 200 OK</d:status>
+                <d:prop><d:current-user-principal><d:href>/1234/principal/</d:href></d:current-user-principal></d:prop>
+            </d:propstat></d:response></d:multistatus>"""
+        home = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response>
+            <d:href>/1234/principal/</d:href>
+            <d:propstat><d:status>HTTP/1.1 200 OK</d:status>
+                <d:prop><c:calendar-home-set><d:href>https://p42-caldav.icloud.com/1234/calendars/</d:href></c:calendar-home-set></d:prop>
+            </d:propstat></d:response></d:multistatus>"""
+        collections = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response>
+            <d:href>https://p42-caldav.icloud.com/1234/calendars/work/</d:href>
+            <d:propstat><d:status>HTTP/1.1 200 OK</d:status>
+                <d:prop><d:displayname>Work</d:displayname><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop>
+            </d:propstat></d:response></d:multistatus>"""
+        sent, patch = capture_requests([
+            FakeResponse(principal, status=207, url="https://caldav.icloud.com/"),
+            FakeResponse(home, status=207, url="https://caldav.icloud.com/1234/principal/"),
+            FakeResponse(collections, status=207, url="https://p42-caldav.icloud.com/1234/calendars/"),
+        ])
+        with patch:
+            found = fetch_events.caldav_discover(cal)
+        self.assertEqual(
+            found,
+            [{"name": "Work", "caldavUrl": "https://p42-caldav.icloud.com/1234/calendars/work/"}],
+        )
+
+    def test_other_servers_cannot_move_discovery_to_another_host(self):
+        principal = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response>
+          <d:propstat><d:prop><d:current-user-principal><d:href>/1234/principal/</d:href>
+          </d:current-user-principal></d:prop></d:propstat></d:response></d:multistatus>"""
+        home = """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+          <d:response><d:propstat><d:prop><c:calendar-home-set>
+          <d:href>https://p42-caldav.icloud.com/1234/calendars/</d:href>
+          </c:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>"""
+        sent, patch = capture_requests([
+            FakeResponse(principal, status=207),
+            FakeResponse(home, status=207),
+        ])
+        cal = {"name": "Nextcloud", "caldavUrl": "https://cloud.example.com/dav/",
+               "username": "user", "password": "pass"}
+        with patch, self.assertRaisesRegex(ValueError, "configured session origin"):
+            fetch_events.caldav_discover(cal)
+        self.assertEqual(len(sent), 2)
+
 
 class WritableCalendarListTests(unittest.TestCase):
     def test_a_caldav_entry_is_offered_as_a_push_target(self):

@@ -70,6 +70,15 @@ class TimezoneResolutionTests(unittest.TestCase):
         self.assertIsNotNone(zone_tokyo)
         self.assertEqual(zone_tokyo.key, "Asia/Tokyo")
 
+        # Less common names Outlook sends for invitations from abroad
+        zone_sa = fetch_events.resolve_timezone("South Africa Standard Time")
+        self.assertIsNotNone(zone_sa)
+        self.assertEqual(zone_sa.key, "Africa/Johannesburg")
+
+        zone_adelaide = fetch_events.resolve_timezone("Cen. Australia Standard Time")
+        self.assertIsNotNone(zone_adelaide)
+        self.assertEqual(zone_adelaide.key, "Australia/Adelaide")
+
     def test_resolve_unknown_or_empty_timezone_returns_none(self):
         self.assertIsNone(fetch_events.resolve_timezone(""))
         self.assertIsNone(fetch_events.resolve_timezone(None))

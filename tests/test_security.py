@@ -3,6 +3,8 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from unittest import mock
 import stat
 import tempfile
@@ -355,6 +357,25 @@ class RecurrenceCpuCeilingTests(unittest.TestCase):
         self.assertGreater(len(instances), 0)
         for inst in instances:
             self.assertTrue(window_start <= inst["start_dt"] <= window_end)
+
+
+class DesktopNotificationTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("dbus-daemon"), "needs dbus-daemon")
+    def test_notify_is_a_well_formed_dbus_call_with_no_child_process(self):
+        # Event text must not become a process argument: those are readable
+        # by any local user in /proc/<pid>/cmdline. A private bus with no
+        # notification daemon answers a well-formed Notify with an error,
+        # while it drops the connection on a malformed one (OSError).
+        daemon = subprocess.Popen(["dbus-daemon", "--session", "--print-address=1", "--nofork"],
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(daemon.wait)
+        self.addCleanup(daemon.terminate)
+        address = daemon.stdout.readline().strip()
+        daemon.stdout.close()
+        with mock.patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": address}), \
+             mock.patch.object(fetch_events.subprocess, "run", side_effect=AssertionError("child process")), \
+             mock.patch.object(fetch_events.subprocess, "Popen", side_effect=AssertionError("child process")):
+            self.assertFalse(fetch_events.dbus_notify("Standup 09:30 \U0001f600", "Room 3, caf\u00e9"))
 
 
 class ConfigAndStateSecurityTests(unittest.TestCase):

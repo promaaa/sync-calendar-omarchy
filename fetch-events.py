@@ -16,6 +16,8 @@ import stat
 import time
 import calendar
 import shutil
+import socket
+import struct
 import subprocess
 import urllib.request
 import urllib.parse
@@ -323,7 +325,7 @@ def stash_secrets(entry, fields, secret_id=None):
         if not isinstance(value, str) or not value or value == KEYRING_MARK:
             continue
         sid = secret_id or entry.get("secretId") or secrets.token_hex(8)
-        stored = _secret_tool(["store", "--label", f"Chronica {entry.get('name') or sid} {field}",
+        stored = _secret_tool(["store", "--label", f"Chronica {field} {sid}",
                                "application", KEYRING_APP, "secret-id", sid, "field", field], value)
         if stored is not None:
             if not secret_id:
@@ -1299,18 +1301,176 @@ GOOGLE_AUTH_EXPIRED_HINT = (
 )
 
 
+class _DBusWriter:
+    """Little-endian D-Bus marshalling, just enough for Notify."""
+
+    def __init__(self):
+        self.data = bytearray()
+
+    def pad(self, n):
+        self.data += b"\0" * (-len(self.data) % n)
+
+    def byte(self, value):
+        self.data.append(value)
+
+    def uint32(self, value, fmt="<I"):
+        self.pad(4)
+        self.data += struct.pack(fmt, value)
+
+    def string(self, text):
+        raw = str(text).encode("utf-8", "replace").replace(b"\0", b"")
+        self.uint32(len(raw))
+        self.data += raw + b"\0"
+
+    def signature(self, text):
+        self.byte(len(text))
+        self.data += text.encode() + b"\0"
+
+    def array(self, items, write_item, align):
+        self.uint32(0)
+        at = len(self.data) - 4
+        self.pad(align)
+        start = len(self.data)
+        for item in items:
+            self.pad(align)
+            write_item(item)
+        struct.pack_into("<I", self.data, at, len(self.data) - start)
+
+
+def _dbus_call(serial, destination, path, interface, member, signature="", body=b""):
+    """One METHOD_CALL message: fixed header, header fields, then the body."""
+    msg = _DBusWriter()
+    msg.data += b"l\x01\x00\x01"  # little-endian, method call, no flags, version 1
+    msg.uint32(len(body))
+    msg.uint32(serial)
+    fields = [(1, "o", path), (2, "s", interface), (3, "s", member), (6, "s", destination)]
+    if signature:
+        fields.append((8, "g", signature))
+
+    def field(item):
+        code, kind, value = item
+        msg.byte(code)
+        msg.signature(kind)
+        if kind == "g":
+            msg.signature(value)
+        else:
+            msg.string(value)
+
+    msg.array(fields, field, 8)
+    msg.pad(8)
+    return bytes(msg.data) + body
+
+
+def _dbus_notify_body(app_name, summary, body, hints, timeout_ms):
+    """Notify(susssasa{sv}i): hints maps a name to ("y", int) or ("s", str)."""
+    msg = _DBusWriter()
+    msg.string(app_name)
+    msg.uint32(0)                      # replaces_id
+    msg.string("")                     # app_icon
+    msg.string(summary)
+    msg.string(body)
+    msg.array([], msg.string, 4)       # actions
+
+    def hint(item):
+        name, (kind, value) = item
+        msg.string(name)
+        msg.signature(kind)
+        if kind == "y":
+            msg.byte(value)
+        else:
+            msg.string(value)
+
+    msg.array(sorted(hints.items()), hint, 8)
+    msg.uint32(timeout_ms, "<i")
+    return bytes(msg.data)
+
+
+def _dbus_session_socket(timeout=5):
+    address = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or f"unix:path=/run/user/{os.getuid()}/bus"
+    for entry in address.split(";"):
+        kind, _, params = entry.partition(":")
+        opts = dict(p.split("=", 1) for p in params.split(",") if "=" in p)
+        if kind != "unix" or not ({"path", "abstract"} & opts.keys()):
+            continue
+        target = urllib.parse.unquote(opts["path"]) if "path" in opts else "\0" + urllib.parse.unquote(opts["abstract"])
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(target)
+            sock.sendall(b"\0AUTH EXTERNAL " + str(os.getuid()).encode().hex().encode() + b"\r\n")
+            reply = b""
+            while not reply.endswith(b"\r\n"):
+                chunk = sock.recv(256)
+                if not chunk:
+                    break
+                reply += chunk
+            if not reply.startswith(b"OK"):
+                raise OSError("D-Bus refused the login")
+            sock.sendall(b"BEGIN\r\n")
+            return sock
+        except OSError:
+            sock.close()
+    raise OSError("no reachable D-Bus session bus")
+
+
+def _dbus_read_type(sock):
+    """Read one whole message from the bus and return its type."""
+    def exact(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise OSError("D-Bus closed the connection")
+            buf += chunk
+        return buf
+
+    head = exact(16)
+    order = "<" if head[:1] == b"l" else ">"
+    body_len, fields_len = struct.unpack(order + "I", head[4:8])[0], struct.unpack(order + "I", head[12:16])[0]
+    header_len = 16 + fields_len + (-(16 + fields_len) % 8)
+    exact(header_len - 16 + body_len)
+    return head[1]
+
+
+def dbus_notify(summary, body="", urgency=1, glyph="\U000f00ed"):
+    """
+    Send a desktop notification over the session bus, the way
+    omarchy-notification-send does, but without a child process. Arguments
+    of any process are world-readable in /proc/<pid>/cmdline, so private
+    calendar text must not travel as one. Returns True when the
+    notification daemon accepted it.
+    """
+    hints = {"urgency": ("y", urgency)}
+    if glyph:
+        hints["omarchy-glyph"] = ("s", glyph)
+    notify = _dbus_notify_body("Chronica", summary, body, hints, -1)
+    with _dbus_session_socket() as sock:
+        sock.sendall(_dbus_call(1, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus", "Hello"))
+        sock.sendall(_dbus_call(2, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                "org.freedesktop.Notifications", "Notify", "susssasa{sv}i", notify))
+        replies = []
+        while len(replies) < 2:  # Hello's answer, then Notify's; signals in between
+            kind = _dbus_read_type(sock)
+            if kind in (2, 3):  # method return, error
+                replies.append(kind)
+    return replies[1] == 2
+
+
+def notify_command(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Payload must be a JSON object")
+    try:
+        sent = dbus_notify(str(payload.get("title") or "Chronica"), str(payload.get("body") or ""))
+    except OSError as e:
+        return {"status": "error", "message": f"Notification failed: {e}"}
+    return {"status": "success" if sent else "error"}
+
+
 def _notify_desktop(title, body):
     """Best-effort desktop notification; never raises, never blocks the sync."""
     try:
-        exe = shutil.which("notify-send")
-        if not exe:
-            return
-        subprocess.run(
-            [exe, "-a", "Omarchy Calendar", "-i", "x-office-calendar", "-u", "critical",
-             str(title), str(body)],
-            timeout=5, check=False,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        dbus_notify(title, body, urgency=2)
     except Exception:
         pass
 
@@ -3507,6 +3667,7 @@ SERVE_COMMANDS = {
     "create-event": _event_command(create_event),
     "update-event": _event_command(update_event),
     "delete-event": _event_command(delete_event),
+    "notify": notify_command,
 }
 
 

@@ -548,22 +548,19 @@ Panel {
     var md = Model.formatAgendaMarkdown(events, root.selectedDateLabel, root.activeCalendarFilter, root.clockHourCycle)
     if (!md) return
 
-    copyProc.command = ["sh", "-c", "printf '%s' \"$1\" | (wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null)", "--", md]
-    copyProc.running = true
+    // Set from QML: a child process would carry the agenda in its arguments,
+    // which any local user can read in /proc/<pid>/cmdline.
+    Quickshell.clipboardText = md
 
     root.agendaCopied = true
     copyFeedbackTimer.restart()
   }
 
   function sendDesktopNotification(title, body) {
-    // Send through omarchy-notification-send with a Nerd Font glyph rather than
-    // a themed icon name: mimetype icons like x-office-calendar are absent from
-    // most icon themes, and an unresolved name renders as a broken-image
-    // placeholder. The glyph is the same literal U+F00ED character the panel
-    // header already uses.
-    notifyQueue.enqueue({
-      command: ["omarchy-notification-send", "--app-name", "Chronica", "-g", "󰃭", "-u", "normal", String(title || "Chronica"), String(body || "")]
-    })
+    // The backend sends it over D-Bus, like omarchy-notification-send, with
+    // the panel's calendar glyph. Event text reaches it on stdin: as process
+    // arguments, any local user could read it in /proc/<pid>/cmdline.
+    backend.call("notify", { title: String(title || "Chronica"), body: String(body || "") })
   }
 
   function openExternalUrl(url) {
@@ -759,9 +756,6 @@ Panel {
   // One long-lived backend process runs every call in turn, so two writes
   // cannot undo each other.
   Backend { id: backend; script: root.backendScript }
-  // Notifications are one-shot commands; a running Process ignores a second
-  // start, so they wait in a queue.
-  JobQueue { id: notifyQueue }
 
   Timer {
     id: deleteArmTimer
@@ -777,10 +771,6 @@ Panel {
 
   Process {
     id: openUrlProc
-  }
-
-  Process {
-    id: copyProc
   }
 
   Process {

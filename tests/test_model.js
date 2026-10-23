@@ -2,6 +2,18 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const Model = require("../Model.js");
 
+test("seconds preference decorates time formats without changing presets", () => {
+  assert.equal(Model.clockFormatWithSeconds("dddd HH:mm", true, false), "dddd HH:mm:ss");
+  assert.equal(Model.clockFormatWithSeconds("h:mm AP", true, false), "h:mm:ss AP");
+  assert.equal(Model.clockFormatWithSeconds("HH\n—\nmm", true, true), "HH\n—\nmm\nss");
+  assert.equal(Model.clockFormatWithSeconds("HH:mm", false, false), "HH:mm");
+  assert.equal(Model.clockFormatWithSeconds("HH:mm:ss", true, false), "HH:mm:ss");
+  assert.equal(Model.clockFormatWithSeconds("d MMMM 'W'ww yyyy", true, false), "d MMMM 'W'ww yyyy");
+  assert.equal(Model.clockFormatWithSeconds("'minutes' HH:mm", true, false), "'minutes' HH:mm:ss");
+  assert.equal(Model.clockFormatWithSeconds("'mm' HH:mm", true, false), "'mm' HH:mm:ss");
+  assert.equal(Model.clockFormatWithSeconds(Model.clockFormatForHourCycle("HH:mm", 12), true, false), "h:mm:ss AP");
+});
+
 test("Model.stepDate forward and backward", () => {
   assert.deepEqual(Model.stepDate("2026-09-16", 1), {
     dateKey: "2026-09-17",

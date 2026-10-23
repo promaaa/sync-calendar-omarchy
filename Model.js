@@ -66,6 +66,22 @@ function clockFormatForHourCycle(format, hourCycle) {
   return current
 }
 
+// Add seconds only to the rendered label, keeping the saved format and its
+// hour-cycle / right-click preset matching unchanged. Qt quotes literal text.
+function clockFormatWithSeconds(format, enabled, vertical) {
+  var current = String(format === undefined || format === null ? "" : format)
+  if (!enabled) return current
+  var tokens = current.match(/'[^']*'|mm|m|ss|s|[\s\S]/g) || []
+  if (tokens.indexOf("ss") !== -1 || tokens.indexOf("s") !== -1) return current
+  for (var i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "mm" || tokens[i] === "m") {
+      tokens[i] += vertical ? "\nss" : ":ss"
+      break
+    }
+  }
+  return tokens.join("")
+}
+
 function hourCycleForClockFormat(format, fallback) {
   var current = String(format === undefined || format === null ? "" : format)
   for (var i = 0; i < CLOCK_FORMAT_PAIRS.length; i++) {
@@ -803,6 +819,7 @@ if (typeof module !== "undefined") {
     nextClockFormat: nextClockFormat,
     normalizedHourCycle: normalizedHourCycle,
     clockFormatForHourCycle: clockFormatForHourCycle,
+    clockFormatWithSeconds: clockFormatWithSeconds,
     hourCycleForClockFormat: hourCycleForClockFormat,
     formatEventTime: formatEventTime,
     isoWeekLiteral: isoWeekLiteral,

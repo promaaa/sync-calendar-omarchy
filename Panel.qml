@@ -55,6 +55,7 @@ Panel {
   readonly property var notifyMinutesBefore: root.setting("notifyMinutesBefore", "staged")
   readonly property int syncIntervalMinutes: root.setting("syncIntervalMinutes", 15)
   readonly property bool enableMeetingLinks: root.setting("enableMeetingLinks", true)
+  readonly property bool showSeconds: root.setting("showSeconds", false)
   readonly property int clockHourCycle: Model.normalizedHourCycle(root.setting(
     "clockHourCycle",
     Model.hourCycleForClockFormat(root.setting("format", "dddd HH:mm"), 24)
@@ -3373,6 +3374,56 @@ Panel {
                       onClicked: root.setClockHourCycle(clockFormatPill.modelData.value)
                     }
                   }
+                }
+              }
+            }
+
+            // Seconds affect only the bar clock, not agenda event times.
+            Rectangle {
+              width: parent.width
+              height: Style.space(60)
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.contentForeground, Color.accent)
+              border.width: Style.spacing.hairline
+              border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+
+              Item {
+                anchors.fill: parent
+                anchors.margins: Style.space(12)
+
+                Column {
+                  anchors.left: parent.left
+                  anchors.right: secondsToggleSwitch.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Show seconds"
+                    color: root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Update the bar clock every second"
+                    color: Qt.darker(root.contentForeground, 1.8)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                ToggleSwitch {
+                  id: secondsToggleSwitch
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  checked: root.showSeconds
+                  foreground: root.contentForeground
+                  accent: Color.accent
+                  onToggled: root.persistSettings({ showSeconds: !root.showSeconds })
                 }
               }
             }

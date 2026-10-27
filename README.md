@@ -196,6 +196,53 @@ An entry with `"translateKorean": true` sends the title and location of its
 Korean events to Google Translate (`translate.googleapis.com`) and shows the
 English result. It is off by default. Leave it off for a private calendar.
 
+### Opening events in their own app
+
+A read-only feed often carries little more than a title and a time. An entry
+with `openUrl` puts an open button (`󰏌`) on each of its events, which opens
+the event where it lives. `{id}` in the link becomes the event's UID and
+`{date}` the agenda day the event is listed under (`YYYY-MM-DD`; for an event
+spanning several days, each of them), both URL-encoded. The button only
+appears when the result is a plain `http(s)://host/...` link; an event whose
+feed had no UID gets one made up by the plugin, which its app will not know.
+Outlook / Office 365 opens an event by its UID, a recurring one as its whole
+series:
+
+```json
+{
+  "name": "Work",
+  "url": "https://outlook.office365.com/owa/calendar/.../calendar.ics",
+  "openUrl": "https://outlook.office.com/calendar/event/{id}"
+}
+```
+
+The link goes to the default browser. To open it somewhere else, add
+`openWith`: the command as a list of arguments, run directly and never
+through a shell, with `{url}` standing for the link. In an Omarchy web app
+window:
+
+```json
+"openWith": ["omarchy-launch-webapp", "{url}"]
+```
+
+Or in a web app installed from Chromium, in the browser profile that is
+signed in to that account (useful with several Microsoft 365 tenants, which
+the default browser cannot tell apart):
+
+```json
+"openWith": ["chromium", "--profile-directory=Profile 1", "--app-id=<app id>",
+             "--app-launch-url-for-shortcuts-menu-item={url}"]
+```
+
+Chromium names that web app's launcher
+`~/.local/share/applications/chrome-<app id>-<profile>.desktop`.
+
+`openWith` runs that program as you when you click the button, so only put
+commands you trust there. The link, with the event's UID in it, is one of
+its arguments: if the program keeps running (a browser that was not already
+open), other local users can read it in `/proc`, as with any link a browser
+is started with.
+
 ## Connecting a Calendar
 
 Open the panel's **Settings (`󰒓`)** and click **`󰐕`**. A terminal opens with a short guided setup:

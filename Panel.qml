@@ -581,8 +581,22 @@ Panel {
     if (!targetUrl) return
     // Validate scheme and characters before passing to Qt.openUrlExternally,
     // which hands the URL to the desktop portal over D-Bus: no command line.
-    if (!/^https?:\/\/[a-zA-Z0-9.\-]+(?::\d+)?(\/[^\s<>"'`]*)?$/i.test(targetUrl)) return
+    if (!Model.isSafeHttpUrl(targetUrl)) return
     Qt.openUrlExternally(targetUrl)
+  }
+
+  function eventOpenTarget(evt) {
+    return Model.eventOpenTarget(root.configuredCalendars, evt, evt ? (evt.dayKey || root.selectedDateKey) : "")
+  }
+
+  // Opens an event in the app its calendar names (openUrl / openWith in
+  // calendars.json). The argv goes straight to exec, never through a shell.
+  function openEventInSource(evt) {
+    var target = root.eventOpenTarget(evt)
+    if (!target) return
+    if (target.argv) Quickshell.execDetached(target.argv)
+    else root.openExternalUrl(target.url)
+    root.close()
   }
 
   function selectDate(key, inMonth, year, month) {
@@ -2393,6 +2407,7 @@ Panel {
                   }
 
                   PanelActionButton {
+                    id: editEventButton
                     visible: Boolean(modelData.editable)
                     anchors.right: deleteEventButton.left
                     anchors.top: parent.top
@@ -2405,13 +2420,31 @@ Panel {
                     onClicked: root.openEditEvent(modelData)
                   }
 
+                  // Open the event in its own app, for calendars that set openUrl
+                  PanelActionButton {
+                    id: openEventButton
+                    visible: Boolean(root.eventOpenTarget(modelData))
+                    anchors.right: modelData.editable ? editEventButton.left
+                      : (modelData.writable ? deleteEventButton.left : parent.right)
+                    anchors.rightMargin: (modelData.editable || modelData.writable) ? 0 : Style.space(4)
+                    anchors.top: parent.top
+                    anchors.topMargin: Style.space(4)
+                    iconText: "󰏌"
+                    tooltipText: "Open in " + (modelData.calendar || "its app")
+                    foreground: root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    opacity: 0.65
+                    onClicked: root.openEventInSource(modelData)
+                  }
+
                   Column {
                     id: eventContentCol
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(14)
-                    anchors.rightMargin: modelData.editable ? Style.space(56) : (modelData.writable ? Style.space(32) : Style.space(10))
+                    anchors.rightMargin: Style.space((modelData.editable ? 56 : (modelData.writable ? 32 : 10))
+                      + (openEventButton.visible ? 22 : 0))
                     spacing: Style.space(2)
 
                     Row {

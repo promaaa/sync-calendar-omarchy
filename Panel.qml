@@ -46,15 +46,30 @@ Panel {
   property var eventsData: Model.parseEventsFile(eventsFile.text())
   readonly property var eventsByDate: eventsData.eventsByDate || ({})
   readonly property var selectedEvents: eventsByDate[selectedDateKey] || []
-  readonly property string selectedDateLabel: Model.formatSelectedDateLabel(selectedDateKey, todayKey, Qt.locale())
+  readonly property string selectedDateLabel: Model.formatSelectedDateLabel(selectedDateKey, todayKey, root.formatLocale, root.i18nStrings)
   readonly property int configuredCalendarCount: eventsData.configuredCount || 0
   property double lastSyncTimestamp: 0
   readonly property bool syncRunning: backend.syncRunning
   readonly property string backendScript: Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, "")
+  // ---- Translations. English stays in the code as each call's fallback; a
+  //      language without a file leaves every string exactly as it is.
+  // Strings follow the language picked under Setup > Language, like the
+  // shell's own; i18n/<code>.json holds them, English stays in the code.
+  Translations { id: i18nCatalog; directory: Qt.resolvedUrl("i18n") }
+  readonly property var i18nStrings: i18nCatalog.strings
+  onI18nStringsChanged: Model.setStrings(root.i18nStrings)
+  Component.onCompleted: Model.setStrings(root.i18nStrings)
+  // Dates and weekday names in the same language's format.
+  readonly property var formatLocale: Qt.locale(I18n.formatLocale)
+  function tr(key, fallback, args) {
+    var table = root.i18nStrings
+    return Model.translate(table, key, fallback, args)
+  }
   readonly property bool notifyUpcomingEvents: root.setting("notifyUpcomingEvents", true)
   readonly property var notifyMinutesBefore: root.setting("notifyMinutesBefore", "staged")
   readonly property int syncIntervalMinutes: root.setting("syncIntervalMinutes", 15)
   readonly property bool enableMeetingLinks: root.setting("enableMeetingLinks", true)
+  readonly property bool translateKoreanTitles: root.setting("translateKoreanTitles", false)
   readonly property int clockHourCycle: Model.normalizedHourCycle(root.setting(
     "clockHourCycle",
     Model.hourCycleForClockFormat(root.setting("format", "dddd HH:mm"), 24)
@@ -96,7 +111,7 @@ Panel {
   property string eventErrorMessage: ""
   // The rendered event being edited, or null while the form adds a new one.
   property var editingEvent: null
-  readonly property var writableCalendars: Model.getWritableCalendars(root.configuredCalendars)
+  readonly property var writableCalendars: Model.getWritableCalendars(root.configuredCalendars, root.i18nStrings)
 
   function toggleShortcutsHelp() {
     root.showingShortcutsHelp = !root.showingShortcutsHelp
@@ -133,7 +148,7 @@ Panel {
     if (writables && writables.length > 0) {
       root.eventCalendar = writables[0].name
     } else {
-      root.eventCalendar = "Local Calendar"
+      root.eventCalendar = root.tr("common.defaultLocalCalendar", "Local Calendar")
     }
     root.addingEvent = true
   }
@@ -177,7 +192,7 @@ Panel {
     root.resetEventFormChrome()
     root.editingEvent = evt
     root.eventTitle = evt.title || ""
-    root.eventCalendar = evt.calendar || "Local Calendar"
+    root.eventCalendar = evt.calendar || root.tr("common.defaultLocalCalendar", "Local Calendar")
     root.eventDate = String(evt.startIso || "").slice(0, 10) || root.selectedDateKey
     root.eventAllDay = Boolean(evt.allDay)
     root.eventStartTime = evt.allDay ? "09:00" : (evt.startTime || "09:00")
@@ -200,13 +215,13 @@ Panel {
 
   function submitEvent() {
     if (!root.eventTitle.trim()) {
-      root.eventErrorMessage = "Please enter an event title"
+      root.eventErrorMessage = root.tr("panel.errorTitleRequired", "Please enter an event title")
       return
     }
 
     var date = Model.parseDateInput(root.eventDate)
     if (!date) {
-      root.eventErrorMessage = "Enter the date as YYYY-MM-DD"
+      root.eventErrorMessage = root.tr("panel.errorBadDate", "Enter the date as YYYY-MM-DD")
       return
     }
     root.eventDate = date
@@ -217,11 +232,11 @@ Panel {
       startTime = Model.parseTimeInput(root.eventStartTime)
       endTime = Model.parseTimeInput(root.eventEndTime)
       if (!startTime || !endTime) {
-        root.eventErrorMessage = "Enter times like 14:30 or 2:30pm"
+        root.eventErrorMessage = root.tr("panel.errorBadTime", "Enter times like 14:30 or 2:30pm")
         return
       }
       if (endTime <= startTime) {
-        root.eventErrorMessage = "The end time must be after the start time"
+        root.eventErrorMessage = root.tr("panel.errorEndBeforeStart", "The end time must be after the start time")
         return
       }
       root.eventStartTime = startTime
@@ -236,12 +251,13 @@ Panel {
 
     var payload = {
       title: root.eventTitle.trim(),
-      calendar: root.eventCalendar || "Local Calendar",
+      calendar: root.eventCalendar || root.tr("common.defaultLocalCalendar", "Local Calendar"),
       start: startIso,
       end: endIso,
       allDay: root.eventAllDay,
       location: root.eventLocation.trim(),
-      description: root.eventDescription.trim()
+      description: root.eventDescription.trim(),
+      translateKorean: root.translateKoreanTitles
     }
 
     var editing = root.editingEvent
@@ -255,7 +271,7 @@ Panel {
     backend.call(editing ? "update-event" : "create-event", payload, function(result) {
       root.eventSubmitting = false
       if (result.status !== "success") {
-        root.eventErrorMessage = result.message || "Could not save the event"
+        root.eventErrorMessage = result.message || root.tr("panel.errorSaveEvent", "Could not save the event")
       } else {
         root.addingEvent = false
       }
@@ -283,13 +299,17 @@ Panel {
     if (!evt || !evt.id) return
     var payload = {
       id: evt.id,
-      calendar: evt.calendar || "Local Calendar",
+      calendar: evt.calendar || root.tr("common.defaultLocalCalendar", "Local Calendar"),
       calendarId: evt.calendarId || "",
-      calendarType: evt.calendarType || "local"
+      calendarType: evt.calendarType || "local",
+      translateKorean: root.translateKoreanTitles
     }
     backend.call("delete-event", payload, function(result) {
       if (result.status !== "success") {
-        root.agendaErrorMessage = "Could not delete \"" + (evt.title || "event") + "\": " + (result.message || "no answer from the backend")
+        root.agendaErrorMessage = root.tr("panel.errorDeleteEvent", "Could not delete \"{title}\": {message}", {
+          title: evt.title || root.tr("panel.eventFallbackTitle", "event"),
+          message: result.message || root.tr("panel.errorNoBackendAnswer", "no answer from the backend")
+        })
         agendaErrorTimer.restart()
       }
       eventsFile.reload()
@@ -303,7 +323,7 @@ Panel {
   readonly property bool isGoogleAuthenticated: eventsData.authenticated === true
   // Non-null while a Google API calendar is stuck on an auth_expired /
   // auth_required status; drives the reconnect banner and the settings row.
-  readonly property var googleAuthIssue: Model.googleAuthIssue(root.configuredCalendars, root.activeCalendars)
+  readonly property var googleAuthIssue: Model.googleAuthIssue(root.configuredCalendars, root.activeCalendars, root.i18nStrings)
   readonly property bool googleAuthRunning: googleAuthProc.running
 
   property bool addingCalendar: false
@@ -347,7 +367,9 @@ Panel {
     backend.call("save-config", list, function(result) {
       if (!backend.hasPending("save-config")) root.pendingCalendars = null
       if (result.status !== "success") {
-        root.agendaErrorMessage = "Could not save the calendar settings: " + (result.message || "no answer from the backend")
+        root.agendaErrorMessage = root.tr("panel.errorSaveCalendars", "Could not save the calendar settings: {message}", {
+          message: result.message || root.tr("panel.errorNoBackendAnswer", "no answer from the backend")
+        })
         agendaErrorTimer.restart()
       }
       configFile.reload()
@@ -460,8 +482,8 @@ Panel {
   // starts out matching the rest of the desktop rather than a hardcoded
   // convention. Clicking the grid's "W" heading writes the choice back to
   // shell.json.
-  readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), Qt.locale().firstDayOfWeek)
-  readonly property string nextWeekStartLabel: Qt.locale().dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
+  readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), root.formatLocale.firstDayOfWeek)
+  readonly property string nextWeekStartLabel: root.formatLocale.dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey)
 
@@ -527,7 +549,7 @@ Panel {
     var now = Date.now()
     if (!force && (now - lastSyncTimestamp < 30000)) return
     lastSyncTimestamp = now
-    backend.call("sync", null, function(result) {
+    backend.call("sync", { translateKorean: root.translateKoreanTitles }, function(result) {
       eventsFile.reload()
       root.checkUpcomingNotifications()
     })
@@ -557,7 +579,7 @@ Panel {
   function copyAgendaMarkdown() {
     var events = root.displayedEvents
     if (!events || events.length === 0) return
-    var md = Model.formatAgendaMarkdown(events, root.selectedDateLabel, root.activeCalendarFilter, root.clockHourCycle)
+    var md = Model.formatAgendaMarkdown(events, root.selectedDateLabel, root.activeCalendarFilter, root.clockHourCycle, root.i18nStrings)
     if (!md) return
 
     // Set from QML: a child process would carry the agenda in its arguments,
@@ -572,7 +594,7 @@ Panel {
     // The backend sends it over D-Bus, like omarchy-notification-send, with
     // the panel's calendar glyph. Event text reaches it on stdin: as process
     // arguments, any local user could read it in /proc/<pid>/cmdline.
-    backend.call("notify", { title: String(title || "Chronica"), body: String(body || "") })
+    backend.call("notify", { title: String(title || root.tr("panel.notificationTitleDefault", "Chronica")), body: String(body || "") })
   }
 
   function openExternalUrl(url) {
@@ -743,7 +765,7 @@ Panel {
   // Locale short day names, trimmed of the trailing period some locales
   // carry ("man." -> "MAN") so the header row stays a clean band of caps.
   function weekdayLabel(weekday) {
-    return String(Qt.locale().dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
+    return String(root.formatLocale.dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
   }
 
   FileView {
@@ -767,7 +789,11 @@ Panel {
 
   // One long-lived backend process runs every call in turn, so two writes
   // cannot undo each other.
-  Backend { id: backend; script: root.backendScript }
+  Backend {
+    id: backend
+    script: root.backendScript
+    translate: function(key, fallback, args) { return root.tr(key, fallback, args) }
+  }
 
   Timer {
     id: deleteArmTimer
@@ -959,7 +985,7 @@ Panel {
                 textFormat: Text.PlainText
                 id: heroDate
                 anchors.verticalCenter: parent.verticalCenter
-                text: Qt.formatDate(root.today, "MMMM d")
+                text: root.today.toLocaleDateString(root.formatLocale, root.tr("fmt.monthDay", "MMMM d"))
                 color: heroMouse.containsMouse
                   ? Style.hoverStateColor(root.contentForeground, Color.accent)
                   : root.contentForeground
@@ -982,7 +1008,7 @@ Panel {
 
               PanelToolTip {
                 visible: heroMouse.containsMouse
-                text: "Back to today"
+                text: root.tr("panel.backToToday", "Back to today")
                 fontFamily: root.contentFontFamily
               }
             }
@@ -1022,7 +1048,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "BORN"
+                    text: root.tr("panel.bornLabel", "BORN")
                     color: Qt.darker(root.contentForeground, 1.5)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -1033,7 +1059,7 @@ Panel {
                     id: bornField
                     width: Style.space(70)
                     anchors.verticalCenter: parent.verticalCenter
-                    placeholderText: "year"
+                    placeholderText: root.tr("panel.bornPlaceholder", "year")
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
                     inputMethodHints: Qt.ImhDigitsOnly
@@ -1046,7 +1072,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.verticalCenterOffset: 0
                     leftPadding: Style.space(6)
-                    text: "LIVE TO"
+                    text: root.tr("panel.liveToLabel", "LIVE TO")
                     color: Qt.darker(root.contentForeground, 1.5)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -1135,7 +1161,7 @@ Panel {
                 id: lifeLabel
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                text: "LIFE"
+                text: root.tr("panel.lifeLabel", "LIFE")
                 color: Qt.darker(root.contentForeground, 1.5)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1185,7 +1211,7 @@ Panel {
 
                 PanelToolTip {
                   visible: lifeMouse.containsMouse
-                  text: "Memento Mori"
+                  text: root.tr("panel.mementoMori", "Memento Mori")
                   fontFamily: root.contentFontFamily
                 }
               }
@@ -1242,7 +1268,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     anchors.centerIn: parent
-                    text: "W"
+                    text: root.tr("panel.weekColumnHeading", "W")
                     color: weekStartMouse.containsMouse
                       ? Style.hoverStateColor(root.contentForeground, Color.accent)
                       : Qt.darker(root.contentForeground, 1.9)
@@ -1262,7 +1288,7 @@ Panel {
 
                   PanelToolTip {
                     visible: weekStartMouse.containsMouse
-                    text: "Start weeks on " + root.nextWeekStartLabel
+                    text: root.tr("panel.startWeeksOn", "Start weeks on {day}", { day: root.nextWeekStartLabel })
                     fontFamily: root.contentFontFamily
                   }
                 }
@@ -1423,7 +1449,7 @@ Panel {
                 // "MAY 2026" and a "SEPTEMBER 2026".
                 width: Style.space(130)
                 horizontalAlignment: Text.AlignHCenter
-                text: Qt.formatDate(root.viewDate, "MMMM yyyy").toUpperCase()
+                text: root.viewDate.toLocaleDateString(root.formatLocale, root.tr("fmt.monthYear", "MMMM yyyy")).toUpperCase()
                 color: Qt.darker(root.contentForeground, 1.4)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -1437,7 +1463,7 @@ Panel {
                 anchors.leftMargin: -Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅁"
-                tooltipText: "Previous month"
+                tooltipText: root.tr("panel.previousMonth", "Previous month")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(-1)
@@ -1448,7 +1474,7 @@ Panel {
                 anchors.rightMargin: -Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅂"
-                tooltipText: "Next month"
+                tooltipText: root.tr("panel.nextMonth", "Next month")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(1)
@@ -1486,7 +1512,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
-                  text: root.agendaMode === "upcoming" ? "NEXT 7 DAYS" : root.selectedDateLabel
+                  text: root.agendaMode === "upcoming" ? root.tr("panel.nextSevenDays", "NEXT 7 DAYS") : root.selectedDateLabel
                   color: root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1524,7 +1550,7 @@ Panel {
 
                 ChoicePill {
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "7 days"
+                  text: root.tr("panel.sevenDaysPill", "7 days")
                   selected: root.agendaMode === "upcoming"
                   foreground: root.contentForeground
                   fontFamily: root.contentFontFamily
@@ -1535,7 +1561,7 @@ Panel {
                   id: addEventBtn
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: "󰐕"
-                  tooltipText: "Add event to " + root.selectedDateLabel + " (n)"
+                  tooltipText: root.tr("panel.addEventTooltip", "Add event to {date} (n)", { date: root.selectedDateLabel })
                   foreground: root.contentForeground
                   fontFamily: root.contentFontFamily
                   onClicked: {
@@ -1548,7 +1574,7 @@ Panel {
                   id: copyAgendaBtn
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: root.agendaCopied ? "󰄬" : "󰆏"
-                  tooltipText: root.agendaCopied ? "Copied agenda to clipboard!" : (root.displayedEvents.length > 0 ? "Copy agenda as Markdown (y)" : "No events to copy")
+                  tooltipText: root.agendaCopied ? root.tr("panel.agendaCopied", "Copied agenda to clipboard!") : (root.displayedEvents.length > 0 ? root.tr("panel.copyAgenda", "Copy agenda as Markdown (y)") : root.tr("panel.noEventsToCopy", "No events to copy"))
                   foreground: root.agendaCopied ? Color.accent : root.contentForeground
                   fontFamily: root.contentFontFamily
                   opacity: root.displayedEvents.length > 0 ? (root.agendaCopied ? 1.0 : 0.85) : 0.4
@@ -1596,7 +1622,7 @@ Panel {
 
                   PanelToolTip {
                     visible: syncMouse.containsMouse
-                    text: root.syncRunning ? "Syncing calendars..." : "Sync calendars (" + (root.eventsData.lastSyncedFormatted || "never") + ")"
+                    text: root.syncRunning ? root.tr("panel.syncing", "Syncing calendars...") : root.tr("panel.syncCalendars", "Sync calendars ({lastSynced})", { lastSynced: root.eventsData.lastSyncedFormatted || root.tr("panel.never", "never") })
                     fontFamily: root.contentFontFamily
                   }
                 }
@@ -1605,7 +1631,7 @@ Panel {
                   id: shortcutsHelpBtn
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: "󰌌"
-                  tooltipText: root.showingShortcutsHelp ? "Hide Shortcuts (?)" : "Keyboard Shortcuts (?)"
+                  tooltipText: root.showingShortcutsHelp ? root.tr("panel.hideShortcuts", "Hide Shortcuts (?)") : root.tr("panel.showShortcuts", "Keyboard Shortcuts (?)")
                   foreground: root.showingShortcutsHelp ? Color.accent : root.contentForeground
                   fontFamily: root.contentFontFamily
                   onClicked: root.toggleShortcutsHelp()
@@ -1614,7 +1640,7 @@ Panel {
                 PanelActionButton {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: "󰒓"
-                  tooltipText: "Calendar Settings"
+                  tooltipText: root.tr("panel.calendarSettingsTooltip", "Calendar Settings")
                   foreground: root.contentForeground
                   fontFamily: root.contentFontFamily
                   onClicked: root.openSettings()
@@ -1659,8 +1685,8 @@ Panel {
                   width: parent.width - googleAuthBannerIcon.width - Style.space(8)
                   wrapMode: Text.WordWrap
                   text: root.googleAuthRunning
-                    ? "Waiting for the Google sign-in to finish in your browser..."
-                    : Model.googleAuthIssueText(root.googleAuthIssue)
+                    ? root.tr("panel.googleSignInWaiting", "Waiting for the Google sign-in to finish in your browser...")
+                    : Model.googleAuthIssueText(root.googleAuthIssue, root.i18nStrings)
                   color: root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1677,7 +1703,7 @@ Panel {
 
               PanelToolTip {
                 visible: googleAuthBannerMouse.containsMouse
-                text: "Opens the Google sign-in page in your browser"
+                text: root.tr("panel.googleSignInTooltip", "Opens the Google sign-in page in your browser")
                 fontFamily: root.contentFontFamily
               }
             }
@@ -1718,7 +1744,7 @@ Panel {
                       }
                       Text {
                         textFormat: Text.PlainText
-                        text: "KEYBOARD SHORTCUTS"
+                        text: root.tr("panel.shortcutsTitle", "KEYBOARD SHORTCUTS")
                         color: root.contentForeground
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -1729,7 +1755,7 @@ Panel {
                   PanelActionButton {
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: "󰅖"
-                    tooltipText: "Close (Esc or ?)"
+                    tooltipText: root.tr("panel.closeShortcuts", "Close (Esc or ?)")
                     foreground: root.contentForeground
                     fontFamily: root.contentFontFamily
                     onClicked: root.closeShortcutsHelp()
@@ -1749,7 +1775,7 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: "NAVIGATION"
+                      text: root.tr("panel.navHeading", "NAVIGATION")
                       color: Qt.darker(root.contentForeground, 1.7)
                       font.family: root.contentFontFamily
                       font.pixelSize: 10
@@ -1758,13 +1784,13 @@ Panel {
 
                     Repeater {
                       model: [
-                        { key: "h / l · ← / →", desc: "Day prev / next" },
-                        { key: "k / j · ↑ / ↓", desc: "Week prev / next" },
-                        { key: "0 / $", desc: "Start / end of week" },
-                        { key: "H / L", desc: "1st / last day of month" },
-                        { key: "[ / ] · PgUp/Dn", desc: "Prev / next month" },
-                        { key: "{ / }", desc: "Prev / next year" },
-                        { key: "t", desc: "Jump to today" }
+                        { key: "h / l · ← / →", desc: root.tr("panel.shortcutDayPrevNext", "Day prev / next") },
+                        { key: "k / j · ↑ / ↓", desc: root.tr("panel.shortcutWeekPrevNext", "Week prev / next") },
+                        { key: "0 / $", desc: root.tr("panel.shortcutWeekBounds", "Start / end of week") },
+                        { key: "H / L", desc: root.tr("panel.shortcutMonthBounds", "1st / last day of month") },
+                        { key: root.tr("panel.shortcutKeyMonthStep", "[ / ] · PgUp/Dn"), desc: root.tr("panel.shortcutMonthPrevNext", "Prev / next month") },
+                        { key: "{ / }", desc: root.tr("panel.shortcutYearPrevNext", "Prev / next year") },
+                        { key: "t", desc: root.tr("panel.shortcutToday", "Jump to today") }
                       ]
                       Row {
                         spacing: Style.space(6)
@@ -1805,7 +1831,7 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: "ACTIONS"
+                      text: root.tr("panel.actionsHeading", "ACTIONS")
                       color: Qt.darker(root.contentForeground, 1.7)
                       font.family: root.contentFontFamily
                       font.pixelSize: 10
@@ -1814,13 +1840,13 @@ Panel {
 
                     Repeater {
                       model: [
-                        { key: "n · Enter", desc: "New event on date" },
-                        { key: "y", desc: "Copy agenda (Markdown)" },
-                        { key: "u", desc: "Day / next 7 days" },
-                        { key: "r", desc: "Sync / refresh calendars" },
-                        { key: "w", desc: "Toggle Mon / Sun start" },
-                        { key: "?", desc: "Toggle this help" },
-                        { key: "Esc", desc: "Close modal / panel" }
+                        { key: root.tr("panel.shortcutKeyNewEvent", "n · Enter"), desc: root.tr("panel.shortcutNewEvent", "New event on date") },
+                        { key: "y", desc: root.tr("panel.shortcutCopyAgenda", "Copy agenda (Markdown)") },
+                        { key: "u", desc: root.tr("panel.shortcutAgendaMode", "Day / next 7 days") },
+                        { key: "r", desc: root.tr("panel.shortcutSync", "Sync / refresh calendars") },
+                        { key: "w", desc: root.tr("panel.shortcutWeekStart", "Toggle Mon / Sun start") },
+                        { key: "?", desc: root.tr("panel.shortcutHelp", "Toggle this help") },
+                        { key: root.tr("panel.shortcutKeyEsc", "Esc"), desc: root.tr("panel.shortcutClose", "Close modal / panel") }
                       ]
                       Row {
                         spacing: Style.space(6)
@@ -1888,7 +1914,7 @@ Panel {
                         spacing: Style.space(6)
                         Text {
                           textFormat: Text.PlainText
-                          text: root.editingEvent ? "EDIT EVENT" : "NEW EVENT"
+                          text: root.editingEvent ? root.tr("panel.editEventHeading", "EDIT EVENT") : root.tr("panel.newEventHeading", "NEW EVENT")
                           color: Color.accent
                           font.family: root.contentFontFamily
                           font.pixelSize: Style.font.caption
@@ -1907,7 +1933,7 @@ Panel {
                     PanelActionButton {
                       anchors.verticalCenter: parent.verticalCenter
                       iconText: "󰅖"
-                      tooltipText: "Close form (Esc)"
+                      tooltipText: root.tr("panel.closeForm", "Close form (Esc)")
                       foreground: root.contentForeground
                       fontFamily: root.contentFontFamily
                       onClicked: root.closeAddEvent()
@@ -1918,7 +1944,7 @@ Panel {
                   BoundedTextField {
                     id: eventTitleInput
                     width: parent.width
-                    placeholderText: "Title, or a sentence: Lunch tomorrow 1pm-2pm"
+                    placeholderText: root.tr("panel.eventTitlePlaceholder", "Title, or a sentence: Lunch tomorrow 1pm-2pm")
                     text: root.eventTitle
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
@@ -1931,7 +1957,7 @@ Panel {
                   BoundedTextField {
                     id: eventDateInput
                     width: Style.space(110)
-                    placeholderText: "YYYY-MM-DD"
+                    placeholderText: root.tr("panel.datePlaceholder", "YYYY-MM-DD")
                     text: root.eventDate
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
@@ -1945,7 +1971,7 @@ Panel {
                     spacing: Style.space(4)
                     Text {
                       textFormat: Text.PlainText
-                      text: "TARGET CALENDAR:"
+                      text: root.tr("panel.targetCalendar", "TARGET CALENDAR:")
                       color: Qt.darker(root.contentForeground, 1.7)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -2008,7 +2034,7 @@ Panel {
                       // All Day Toggle
                       ChoicePill {
                         height: Style.space(24)
-                        text: "All Day"
+                        text: root.tr("panel.allDayPill", "All Day")
                         selected: root.eventAllDay
                         foreground: root.contentForeground
                         fontFamily: root.contentFontFamily
@@ -2095,7 +2121,7 @@ Panel {
                   BoundedTextField {
                     id: eventLocInput
                     width: parent.width
-                    placeholderText: "Location or Video Meeting URL (optional)"
+                    placeholderText: root.tr("panel.locationPlaceholder", "Location or Video Meeting URL (optional)")
                     text: root.eventLocation
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
@@ -2106,7 +2132,7 @@ Panel {
                   BoundedTextField {
                     id: eventDescInput
                     width: parent.width
-                    placeholderText: "Description / Notes (optional)"
+                    placeholderText: root.tr("panel.descriptionPlaceholder", "Description / Notes (optional)")
                     text: root.eventDescription
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
@@ -2139,7 +2165,7 @@ Panel {
                         textFormat: Text.PlainText
                         id: cancelEventBtnText
                         anchors.centerIn: parent
-                        text: "Cancel"
+                        text: root.tr("panel.cancel", "Cancel")
                         color: Qt.darker(root.contentForeground, 1.5)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -2167,7 +2193,7 @@ Panel {
                         Text {
                           textFormat: Text.PlainText
                           id: submitEventBtnText
-                          text: root.eventSubmitting ? "Saving..." : (root.editingEvent ? "Save Changes" : "Save Event")
+                          text: root.eventSubmitting ? root.tr("panel.saving", "Saving...") : (root.editingEvent ? root.tr("panel.saveChanges", "Save Changes") : root.tr("panel.saveEvent", "Save Event"))
                           color: Color.background
                           font.family: root.contentFontFamily
                           font.pixelSize: Style.font.caption
@@ -2225,7 +2251,7 @@ Panel {
                       textFormat: Text.PlainText
                       id: allChipText
                       anchors.centerIn: parent
-                      text: "All"
+                      text: root.tr("panel.allFilter", "All")
                       color: allChip.isSelected ? Style.selectedStateColor(root.contentForeground, Color.accent) : root.contentForeground
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -2334,7 +2360,7 @@ Panel {
                     visible: Boolean(modelData.dayHeading)
                     topPadding: Style.space(4)
                     textFormat: Text.PlainText
-                    text: visible ? Model.formatSelectedDateLabel(modelData.dayHeading, root.todayKey, Qt.locale()) : ""
+                    text: visible ? Model.formatSelectedDateLabel(modelData.dayHeading, root.todayKey, root.formatLocale, root.i18nStrings) : ""
                     color: Qt.darker(root.contentForeground, 1.4)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -2383,9 +2409,9 @@ Panel {
                     // occurrence deletes every occurrence.
                     tooltipText: deleteEventButton.armed
                       ? (modelData.recurring && modelData.calendarType === "caldav"
-                         ? "Click again to delete ALL occurrences of this series"
-                         : "Click again to delete")
-                      : "Delete event from " + (modelData.calendar || "calendar")
+                         ? root.tr("panel.confirmDeleteSeries", "Click again to delete ALL occurrences of this series")
+                         : root.tr("panel.confirmDelete", "Click again to delete"))
+                      : root.tr("panel.deleteEventFrom", "Delete event from {calendar}", { calendar: modelData.calendar || root.tr("panel.calendarFallback", "calendar") })
                     foreground: deleteEventButton.armed ? Color.urgent : root.contentForeground
                     fontFamily: root.contentFontFamily
                     opacity: deleteEventButton.armed ? 1 : 0.65
@@ -2398,7 +2424,7 @@ Panel {
                     anchors.top: parent.top
                     anchors.topMargin: Style.space(4)
                     iconText: "󰏫"
-                    tooltipText: "Edit event"
+                    tooltipText: root.tr("panel.editEvent", "Edit event")
                     foreground: root.contentForeground
                     fontFamily: root.contentFontFamily
                     opacity: 0.65
@@ -2420,7 +2446,7 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: modelData.allDay ? "ALL DAY" : root.eventTimeRange(modelData, " – ")
+                        text: modelData.allDay ? root.tr("panel.allDayLabel", "ALL DAY") : root.eventTimeRange(modelData, " – ")
                         color: Qt.darker(root.contentForeground, 1.4)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -2455,7 +2481,7 @@ Panel {
                       textFormat: Text.PlainText
                       width: parent.width
                       visible: eventCard.expanded
-                      text: modelData.description || (modelData.editable ? "No description." : "No description. This event is read-only here.")
+                      text: modelData.description || (modelData.editable ? root.tr("panel.noDescription", "No description.") : root.tr("panel.noDescriptionReadOnly", "No description. This event is read-only here."))
                       color: Qt.darker(root.contentForeground, 1.3)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -2534,7 +2560,7 @@ Panel {
                           Text {
                             textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
-                            text: modelData.meetingProvider ? "Join " + modelData.meetingProvider : "Join Meeting"
+                            text: modelData.meetingProvider ? root.tr("panel.joinProvider", "Join {provider}", { provider: modelData.meetingProvider }) : root.tr("panel.joinMeeting", "Join Meeting")
                             color: joinMouse.containsMouse ? Color.background : root.contentForeground
                             font.family: root.contentFontFamily
                             font.pixelSize: Style.font.caption
@@ -2567,7 +2593,7 @@ Panel {
               Text {
                 visible: root.displayedEvents.length > root.maxAgendaRows
                 textFormat: Text.PlainText
-                text: "and " + (root.displayedEvents.length - root.maxAgendaRows) + " more"
+                text: root.tr("panel.moreEvents", "and {count} more", { count: root.displayedEvents.length - root.maxAgendaRows })
                 color: Qt.darker(root.contentForeground, 1.5)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.caption
@@ -2599,10 +2625,10 @@ Panel {
                   textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
                   text: root.selectedEvents.length > 0
-                    ? ("No " + root.activeCalendarFilter + " events for this day")
+                    ? root.tr("panel.noFilteredEvents", "No {calendar} events for this day", { calendar: root.activeCalendarFilter })
                     : (root.configuredCalendarCount === 0
-                        ? "Add calendar feeds to ~/.config/omarchy/calendars.json"
-                        : "No events scheduled for this day")
+                        ? root.tr("panel.noCalendarsHint", "Add calendar feeds to ~/.config/omarchy/calendars.json")
+                        : root.tr("panel.noEvents", "No events scheduled for this day"))
                   color: Qt.darker(root.contentForeground, 1.8)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.caption
@@ -2634,7 +2660,7 @@ Panel {
               PanelActionButton {
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅁"
-                tooltipText: "Back to calendar"
+                tooltipText: root.tr("panel.backToCalendar", "Back to calendar")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.closeSettings()
@@ -2643,7 +2669,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
-                text: "CALENDAR SETTINGS"
+                text: root.tr("panel.calendarSettingsTitle", "CALENDAR SETTINGS")
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -2661,7 +2687,7 @@ Panel {
                 visible: !root.addingCalendar
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰏫"
-                tooltipText: "Add a feed by hand"
+                tooltipText: root.tr("panel.addFeedByHand", "Add a feed by hand")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.startAddingCalendar("url")
@@ -2671,7 +2697,7 @@ Panel {
                 visible: !root.addingCalendar
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰐕"
-                tooltipText: "Connect a calendar (guided setup)"
+                tooltipText: root.tr("panel.connectCalendarGuided", "Connect a calendar (guided setup)")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.openSetup()
@@ -2718,7 +2744,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "Calendars (" + root.configuredCalendars.length + ")"
+                  text: root.tr("panel.calendarsTab", "Calendars ({count})", { count: root.configuredCalendars.length })
                   color: root.settingsTab === "calendars" ? Color.background : root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.caption
@@ -2761,7 +2787,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "Preferences"
+                  text: root.tr("panel.preferencesTab", "Preferences")
                   color: root.settingsTab === "preferences" ? Color.background : root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.caption
@@ -2811,7 +2837,7 @@ Panel {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: "NEW CALENDAR FEED"
+                  text: root.tr("panel.newCalendarFeed", "NEW CALENDAR FEED")
                   color: root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.caption
@@ -2835,7 +2861,7 @@ Panel {
                       textFormat: Text.PlainText
                       id: typeUrlText
                       anchors.centerIn: parent
-                      text: "iCal / Webcal URL"
+                      text: root.tr("panel.typeIcal", "iCal / Webcal URL")
                       color: root.formType === "url" ? Color.background : root.contentForeground
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -2864,7 +2890,7 @@ Panel {
                       textFormat: Text.PlainText
                       id: typeGoogleText
                       anchors.centerIn: parent
-                      text: "Google Calendar ID"
+                      text: root.tr("panel.typeGoogle", "Google Calendar ID")
                       color: root.formType === "googleId" ? Color.background : root.contentForeground
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -2922,7 +2948,7 @@ Panel {
                       textFormat: Text.PlainText
                       id: typeLocalText
                       anchors.centerIn: parent
-                      text: "Local Offline"
+                      text: root.tr("panel.typeLocal", "Local Offline")
                       color: root.formType === "local" ? Color.background : root.contentForeground
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -2944,7 +2970,7 @@ Panel {
                 BoundedTextField {
                   id: calNameInput
                   width: parent.width
-                  placeholderText: "Calendar Name (e.g. Personal, Proton, Local Work)"
+                  placeholderText: root.tr("panel.calendarNamePlaceholder", "Calendar Name (e.g. Personal, Proton, Local Work)")
                   text: root.formName
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
@@ -2956,7 +2982,7 @@ Panel {
                   id: calJmapUrlInput
                   visible: root.formType === "jmap"
                   width: parent.width
-                  placeholderText: "Session URL (default: https://api.fastmail.com/jmap/session)"
+                  placeholderText: root.tr("panel.jmapSessionPlaceholder", "Session URL (default: https://api.fastmail.com/jmap/session)")
                   text: root.formJmapUrl
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
@@ -2968,7 +2994,7 @@ Panel {
                   id: calJmapTokenInput
                   visible: root.formType === "jmap"
                   width: parent.width
-                  placeholderText: "JMAP API / Bearer Token"
+                  placeholderText: root.tr("panel.jmapTokenPlaceholder", "JMAP API / Bearer Token")
                   password: true
                   text: root.formJmapToken
                   foreground: root.contentForeground
@@ -2982,10 +3008,10 @@ Panel {
                   visible: root.formType !== "local"
                   width: parent.width
                   placeholderText: root.formType === "googleId"
-                    ? "Google Calendar ID (e.g. xyz@group.calendar.google.com)"
+                    ? root.tr("panel.googleCalendarIdPlaceholder", "Google Calendar ID (e.g. xyz@group.calendar.google.com)")
                     : (root.formType === "jmap"
-                       ? "Calendar ID (optional, leave blank for all)"
-                       : "iCal URL (Google, Apple, Proton .ics link)")
+                       ? root.tr("panel.jmapCalendarIdPlaceholder", "Calendar ID (optional, leave blank for all)")
+                       : root.tr("panel.icalUrlPlaceholder", "iCal URL (Google, Apple, Proton .ics link)"))
                   text: root.formAddress
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
@@ -3005,7 +3031,7 @@ Panel {
                     Text {
                       textFormat: Text.PlainText
                       anchors.verticalCenter: parent.verticalCenter
-                      text: "Color:"
+                      text: root.tr("panel.colorLabel", "Color:")
                       color: Qt.darker(root.contentForeground, 1.5)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -3048,7 +3074,7 @@ Panel {
                       textFormat: Text.PlainText
                       id: cancelBtnText
                       anchors.centerIn: parent
-                      text: "Cancel"
+                      text: root.tr("panel.cancel", "Cancel")
                       color: Qt.darker(root.contentForeground, 1.5)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -3078,7 +3104,7 @@ Panel {
                       textFormat: Text.PlainText
                       id: addBtnText
                       anchors.centerIn: parent
-                      text: "Add Calendar"
+                      text: root.tr("panel.addCalendar", "Add Calendar")
                       color: Color.background
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -3105,7 +3131,7 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: "ACTIVE CALENDARS (" + root.configuredCalendars.length + ")"
+              text: root.tr("panel.activeCalendars", "ACTIVE CALENDARS ({count})", { count: root.configuredCalendars.length })
               color: Qt.darker(root.contentForeground, 1.8)
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
@@ -3160,7 +3186,7 @@ Panel {
                     }
 
                     PanelToolTip {
-                      text: modelData.enabled !== false ? "Disable calendar" : "Enable calendar"
+                      text: modelData.enabled !== false ? root.tr("panel.disableCalendar", "Disable calendar") : root.tr("panel.enableCalendar", "Enable calendar")
                       fontFamily: root.contentFontFamily
                     }
                   }
@@ -3180,7 +3206,7 @@ Panel {
                     }
 
                     PanelToolTip {
-                      text: "Click to change color"
+                      text: root.tr("panel.changeColor", "Click to change color")
                       fontFamily: root.contentFontFamily
                     }
                   }
@@ -3195,7 +3221,7 @@ Panel {
                       spacing: Style.space(6)
                       Text {
                         textFormat: Text.PlainText
-                        text: modelData.name || "Untitled"
+                        text: modelData.name || root.tr("panel.untitled", "Untitled")
                         color: modelData.enabled !== false ? root.contentForeground : Qt.darker(root.contentForeground, 2.0)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.bodySmall
@@ -3204,7 +3230,7 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: (modelData.type === "jmap" || modelData.jmapToken) ? "JMAP" : (modelData.googleCalendarId ? "GOOGLE API" : "ICAL FEED")
+                        text: (modelData.type === "jmap" || modelData.jmapToken) ? "JMAP" : (modelData.googleCalendarId ? root.tr("panel.typeGoogleBadge", "GOOGLE API") : root.tr("panel.typeIcalBadge", "ICAL FEED"))
                         color: Qt.darker(root.contentForeground, 1.9)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.caption
@@ -3218,11 +3244,11 @@ Panel {
                         && root.googleAuthIssue.names.indexOf(String(modelData.name || "")) >= 0
                       text: loginProblem
                         ? (root.googleAuthRunning
-                            ? "Waiting for Google sign-in..."
+                            ? root.tr("panel.waitingGoogleSignIn", "Waiting for Google sign-in...")
                             : (root.googleAuthIssue.kind === "expired"
-                                ? "Google login expired - click 󰌆 to reconnect"
-                                : "Google login required - click 󰌆 to connect"))
-                        : ((modelData.type === "jmap" || modelData.jmapToken) ? (modelData.jmapUrl || "JMAP Feed") : (modelData.googleCalendarId || modelData.url || "No address"))
+                                ? root.tr("panel.googleExpiredRow", "Google login expired - click 󰌆 to reconnect")
+                                : root.tr("panel.googleRequiredRow", "Google login required - click 󰌆 to connect")))
+                        : ((modelData.type === "jmap" || modelData.jmapToken) ? (modelData.jmapUrl || root.tr("panel.jmapFeedFallback", "JMAP Feed")) : (modelData.googleCalendarId || modelData.url || root.tr("panel.noAddress", "No address")))
                       color: loginProblem ? Color.accent : Qt.darker(root.contentForeground, 1.9)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -3236,7 +3262,7 @@ Panel {
                     visible: !!modelData.googleCalendarId
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: "󰌆"
-                    tooltipText: root.googleAuthRunning ? "Waiting for Google sign-in..." : "Reconnect Google account"
+                    tooltipText: root.googleAuthRunning ? root.tr("panel.waitingGoogleSignIn", "Waiting for Google sign-in...") : root.tr("panel.reconnectGoogle", "Reconnect Google account")
                     foreground: (root.googleAuthIssue !== null) ? Color.accent : root.contentForeground
                     fontFamily: root.contentFontFamily
                     onClicked: root.openGoogleAuth()
@@ -3246,7 +3272,7 @@ Panel {
                   PanelActionButton {
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: "󰆴"
-                    tooltipText: "Delete calendar"
+                    tooltipText: root.tr("panel.deleteCalendar", "Delete calendar")
                     foreground: root.contentForeground
                     fontFamily: root.contentFontFamily
                     onClicked: root.removeCalendar(calItemRow.index)
@@ -3270,7 +3296,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   anchors.horizontalCenter: parent.horizontalCenter
-                  text: "No Calendars Configured"
+                  text: root.tr("panel.noCalendarsConfigured", "No Calendars Configured")
                   color: root.contentForeground
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -3288,7 +3314,7 @@ Panel {
                     textFormat: Text.PlainText
                     id: addFirstBtnText
                     anchors.centerIn: parent
-                    text: "+ Connect a Calendar"
+                    text: root.tr("panel.connectFirstCalendar", "+ Connect a Calendar")
                     color: Color.background
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -3335,7 +3361,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Clock Format"
+                    text: root.tr("panel.clockFormat", "Clock Format")
                     color: root.contentForeground
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -3344,7 +3370,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Choose a 12-hour or 24-hour clock"
+                    text: root.tr("panel.clockFormatHint", "Choose a 12-hour or 24-hour clock")
                     color: Qt.darker(root.contentForeground, 1.8)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -3359,8 +3385,8 @@ Panel {
 
                   Repeater {
                     model: [
-                      { label: "12-hour", value: 12 },
-                      { label: "24-hour", value: 24 }
+                      { label: root.tr("panel.hour12", "12-hour"), value: 12 },
+                      { label: root.tr("panel.hour24", "24-hour"), value: 24 }
                     ]
 
                     ChoicePill {
@@ -3396,7 +3422,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Auto-Sync Interval"
+                    text: root.tr("panel.autoSync", "Auto-Sync Interval")
                     color: root.contentForeground
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -3405,7 +3431,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Background updates"
+                    text: root.tr("panel.autoSyncHint", "Background updates")
                     color: Qt.darker(root.contentForeground, 1.8)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -3421,7 +3447,7 @@ Panel {
                       { label: "15m", value: 15 },
                       { label: "30m", value: 30 },
                       { label: "60m", value: 60 },
-                      { label: "Manual", value: 0 }
+                      { label: root.tr("panel.syncManual", "Manual"), value: 0 }
                     ]
 
                     ChoicePill {
@@ -3465,7 +3491,7 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: "Desktop Notifications"
+                      text: root.tr("panel.desktopNotifications", "Desktop Notifications")
                       color: root.contentForeground
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.bodySmall
@@ -3474,7 +3500,7 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: "Alert before upcoming meetings & appointments"
+                      text: root.tr("panel.desktopNotificationsHint", "Alert before upcoming meetings & appointments")
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.caption
@@ -3499,11 +3525,11 @@ Panel {
 
                   Repeater {
                     model: [
-                      { label: "10, 5, 1m (Staged)", value: "staged" },
-                      { label: "5 min", value: 5 },
-                      { label: "10 min", value: 10 },
-                      { label: "15 min", value: 15 },
-                      { label: "30 min", value: 30 }
+                      { label: root.tr("panel.notifyStaged", "10, 5, 1m (Staged)"), value: "staged" },
+                      { label: root.tr("panel.notify5", "5 min"), value: 5 },
+                      { label: root.tr("panel.notify10", "10 min"), value: 10 },
+                      { label: root.tr("panel.notify15", "15 min"), value: 15 },
+                      { label: root.tr("panel.notify30", "30 min"), value: 30 }
                     ]
 
                     ChoicePill {
@@ -3521,7 +3547,57 @@ Panel {
               }
             }
 
-            // 4. 1-Click Meeting Join Integration Card
+            // 4. Translate Korean Titles Card
+            Rectangle {
+              width: parent.width
+              height: Style.space(60)
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.contentForeground, Color.accent)
+              border.width: Style.spacing.hairline
+              border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+
+              Item {
+                anchors.fill: parent
+                anchors.margins: Style.space(12)
+
+                Column {
+                  anchors.left: parent.left
+                  anchors.right: translateKoreanToggleSwitch.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.tr("panel.translateKoreanTitle", "Translate Korean Titles")
+                    color: root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.tr("panel.translateKoreanSubtitle", "Send Korean event titles to Google Translate and show them in English")
+                    color: Qt.darker(root.contentForeground, 1.8)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                ToggleSwitch {
+                  id: translateKoreanToggleSwitch
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  checked: root.translateKoreanTitles
+                  foreground: root.contentForeground
+                  accent: Color.accent
+                  onToggled: root.persistSettings({ translateKoreanTitles: !root.translateKoreanTitles })
+                }
+              }
+            }
+
+            // 5. 1-Click Meeting Join Integration Card
             Rectangle {
               width: parent.width
               height: Style.space(60)
@@ -3543,7 +3619,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "1-Click Meeting Join"
+                    text: root.tr("panel.oneClickJoin", "1-Click Meeting Join")
                     color: root.contentForeground
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -3552,7 +3628,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Show direct join buttons for Zoom, Google Meet, Teams"
+                    text: root.tr("panel.oneClickJoinHint", "Show direct join buttons for Zoom, Google Meet, Teams")
                     color: Qt.darker(root.contentForeground, 1.8)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -3571,7 +3647,7 @@ Panel {
               }
             }
 
-            // 5. Calendar Week Start Card
+            // 6. Calendar Week Start Card
             Rectangle {
               width: parent.width
               height: Style.space(60)
@@ -3593,7 +3669,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "First Day of Week"
+                    text: root.tr("panel.firstDayOfWeek", "First Day of Week")
                     color: root.contentForeground
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -3602,7 +3678,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Start calendar grid on Monday or Sunday"
+                    text: root.tr("panel.firstDayOfWeekHint", "Start calendar grid on Monday or Sunday")
                     color: Qt.darker(root.contentForeground, 1.8)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -3616,7 +3692,7 @@ Panel {
                   spacing: Style.space(4)
 
                   ChoicePill {
-                    text: "Monday"
+                    text: root.tr("panel.monday", "Monday")
                     selected: root.weekStart === 1
                     foreground: root.contentForeground
                     fontFamily: root.contentFontFamily
@@ -3624,7 +3700,7 @@ Panel {
                   }
 
                   ChoicePill {
-                    text: "Sunday"
+                    text: root.tr("panel.sunday", "Sunday")
                     selected: root.weekStart === 0
                     foreground: root.contentForeground
                     fontFamily: root.contentFontFamily

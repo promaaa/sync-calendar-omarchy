@@ -39,17 +39,17 @@ ga = load_script("google_auth", "google-auth.py")
 
 def ask(prompt, default=""):
     suffix = f" [{default}]" if default else ""
-    value = input(f"{prompt}{suffix}: ").strip()
+    value = input(fe._t("setup.askPrompt", "{prompt}: ", prompt=prompt + suffix)).strip()
     return value or default
 
 
 def ask_secret(prompt):
-    return getpass.getpass(f"{prompt} (hidden): ").strip()
+    return getpass.getpass(fe._t("setup.secretAskPrompt", "{prompt} (hidden): ", prompt=prompt)).strip()
 
 
 def open_guide(anchor):
     url = GUIDE + "#" + anchor
-    print(f"\nOpening the guide: {url}")
+    print("\n" + fe._t("setup.openingGuide", "Opening the guide: {url}", url=url))
     webbrowser.open(url)
 
 
@@ -58,11 +58,11 @@ def pick(options, label):
     for i, (title, detail) in enumerate(options, 1):
         print(f"  {i:>2}  {title}" + (f"  ({detail})" if detail else ""))
     while True:
-        raw = input(f"{label} (e.g. 1,3; Enter = all): ").strip()
+        raw = input(fe._t("setup.pickPrompt", "{label} (e.g. 1,3; Enter = all): ", label=label)).strip()
         chosen = parse_pick(raw, len(options))
         if chosen is not None:
             return chosen
-        print("  Type numbers from the list, separated by commas.")
+        print("  " + fe._t("setup.pickRetry", "Type numbers from the list, separated by commas."))
 
 
 def parse_pick(raw, count):
@@ -109,8 +109,8 @@ def save(entries):
     config = fe.safe_load_json(fe.CONFIG_PATH, max_bytes=fe.MAX_CONFIG_BYTES) or []
     fe.save_calendars(add_entries(config, entries))  # passwords and tokens go to the keyring when one runs
     for entry in entries:
-        print(f"  + {entry['name']}")
-    print(f"Saved to {fe.CONFIG_PATH}")
+        print("  " + fe._t("setup.addedEntry", "+ {name}", name=entry['name']))
+    print(fe._t("setup.savedTo", "Saved to {path}", path=fe.CONFIG_PATH))
 
 
 def configured(key):
@@ -123,30 +123,30 @@ def configured(key):
 def google_client():
     saved = ga.load_saved_auth()
     if saved.get("client_id") and saved.get("client_secret"):
-        if ask("Reuse the Google app you set up before? (Y/n)", "y").lower().startswith("y"):
+        if ask(fe._t("setup.reuseGoogleApp", "Reuse the Google app you set up before? (Y/n)"), "y").lower().startswith(("y", "j")):
             return saved["client_id"], saved["client_secret"]
 
     found = ga.find_downloaded_client()
     if found:
-        print(f"Found ~/Downloads/{found[2]}")
-        if ask("Use it? (Y/n)", "y").lower().startswith("y"):
+        print(fe._t("setup.foundDownload", "Found ~/Downloads/{filename}", filename=found[2]))
+        if ask(fe._t("setup.useDownload", "Use it? (Y/n)"), "y").lower().startswith(("y", "j")):
             return found[0], found[1]
 
-    print("\nGoogle needs a small app of your own (one time, about 5 minutes).")
+    print("\n" + fe._t("setup.googleIntro", "Google needs a small app of your own (one time, about 5 minutes)."))
     open_guide("google")
-    print("Follow the guide. When you download the client JSON, come back here.")
+    print(fe._t("setup.googleFollowGuide", "Follow the guide. When you download the client JSON, come back here."))
     while True:
-        raw = input("Press Enter once it is in ~/Downloads, or paste the Client ID: ").strip()
+        raw = input(fe._t("setup.googlePressEnter", "Press Enter once it is in ~/Downloads, or paste the Client ID: ")).strip()
         if raw:
-            secret = ask_secret("Client secret")
+            secret = ask_secret(fe._t("setup.clientSecretPrompt", "Client secret"))
             if secret:
                 return raw, secret
             continue
         found = ga.find_downloaded_client()
         if found:
-            print(f"Found ~/Downloads/{found[2]}")
+            print(fe._t("setup.foundDownload", "Found ~/Downloads/{filename}", filename=found[2]))
             return found[0], found[1]
-        print("  No client_secret_*.json in ~/Downloads yet.")
+        print("  " + fe._t("setup.noClientJson", "No client_secret_*.json in ~/Downloads yet."))
 
 
 def google_calendars():
@@ -159,22 +159,24 @@ def google_calendars():
 def setup_google():
     client_id, client_secret = google_client()
     ga.authorize(client_id, client_secret)
-    print("Signed in.\n")
+    print(fe._t("setup.signedIn", "Signed in.") + "\n")
     try:
         items = google_calendars()
     except Exception as exc:
-        raise RuntimeError(
-            f"Signed in, but listing calendars failed ({exc}). Is the Google Calendar API enabled on the project?"
-        ) from exc
+        raise RuntimeError(fe._t(
+            "setup.listingFailed",
+            "Signed in, but listing calendars failed ({error}). Is the Google Calendar API enabled on the project?",
+            error=exc,
+        )) from exc
     have = configured("googleCalendarId")
     items = [c for c in items if c.get("id") not in have]
     if not items:
-        print("Every calendar on this account is already added.")
+        print(fe._t("setup.allCalendarsAdded", "Every calendar on this account is already added."))
         return []
-    print("Calendars on this account:")
+    print(fe._t("setup.calendarsOnAccount", "Calendars on this account:"))
     options = [(c.get("summaryOverride") or c.get("summary") or c["id"],
                 "primary" if c.get("primary") else c.get("accessRole", "")) for c in items]
-    chosen = pick(options, "Add which")
+    chosen = pick(options, fe._t("setup.addWhich", "Add which"))
     return [{
         "name": options[i][0],
         "googleCalendarId": items[i]["id"],
@@ -185,23 +187,23 @@ def setup_google():
 def reconnect_google():
     saved = ga.load_saved_auth()
     if not (saved.get("client_id") and saved.get("client_secret")):
-        print("No Google app saved yet, starting the full Google setup.")
+        print(fe._t("setup.noGoogleApp", "No Google app saved yet, starting the full Google setup."))
         return setup_google()
     ga.authorize(saved["client_id"], saved["client_secret"])
-    print("Google reconnected.")
+    print(fe._t("setup.googleReconnected", "Google reconnected."))
     return []
 
 
 def caldav_accounts(base, username, password, label):
     probe = {"name": label, "caldavUrl": base, "username": username, "password": password}
-    print("Looking up your calendars...")
+    print(fe._t("setup.lookingUpCalendars", "Looking up your calendars..."))
     found = fe.caldav_discover(probe)
     have = configured("caldavUrl")
     found = [c for c in found if c["caldavUrl"] not in have]
     if not found:
-        print("No new calendars found on this account.")
+        print(fe._t("setup.noNewCalendars", "No new calendars found on this account."))
         return []
-    chosen = pick([(c["name"] or c["caldavUrl"], "") for c in found], "Add which")
+    chosen = pick([(c["name"] or c["caldavUrl"], "") for c in found], fe._t("setup.addWhich", "Add which"))
     return [{
         "name": found[i]["name"] or label,
         "caldavUrl": found[i]["caldavUrl"],
@@ -212,72 +214,78 @@ def caldav_accounts(base, username, password, label):
 
 def setup_icloud():
     open_guide("icloud")
-    print("Create an app-specific password (your Apple ID password will not work).")
-    username = ask("Apple ID email")
-    password = ask_secret("App-specific password (xxxx-xxxx-xxxx-xxxx)")
+    print(fe._t("setup.icloudPasswordHint", "Create an app-specific password (your Apple ID password will not work)."))
+    username = ask(fe._t("setup.appleIdPrompt", "Apple ID email"))
+    password = ask_secret(fe._t("setup.appPasswordPrompt", "App-specific password (xxxx-xxxx-xxxx-xxxx)"))
     return caldav_accounts(fe.CALDAV_DEFAULT_HOST, username, password, "iCloud")
 
 
 def setup_caldav():
     open_guide("caldav")
-    server = ask("Server address (e.g. cloud.example.com)")
+    server = ask(fe._t("setup.serverAddressPrompt", "Server address (e.g. cloud.example.com)"))
     if "://" not in server:
         server = "https://" + server
     parts = urllib.parse.urlsplit(server)
     if parts.path in ("", "/"):
         # Nextcloud and ownCloud serve CalDAV here; other servers answer on the root.
         server = urllib.parse.urlunsplit(parts._replace(path="/remote.php/dav/"))
-        server = ask("CalDAV address", server)
-    username = ask("Username")
-    password = ask_secret("App password")
+        server = ask(fe._t("setup.caldavAddressPrompt", "CalDAV address"), server)
+    username = ask(fe._t("setup.usernamePrompt", "Username"))
+    password = ask_secret(fe._t("setup.appPasswordLabel", "App password"))
     return caldav_accounts(server, username, password, parts.hostname or "CalDAV")
 
 
 def setup_jmap():
     open_guide("jmap")
-    url = ask("Session URL", "https://api.fastmail.com/jmap/session")
-    token = ask_secret("API token")
-    name = ask("Name", "Fastmail" if "fastmail" in url else "JMAP")
+    url = ask(fe._t("setup.sessionUrlPrompt", "Session URL"), "https://api.fastmail.com/jmap/session")
+    token = ask_secret(fe._t("setup.apiTokenPrompt", "API token"))
+    name = ask(fe._t("setup.namePrompt", "Name"), fe._t("setup.fastmailName", "Fastmail") if "fastmail" in url else "JMAP")
     entry = {"name": name, "type": "jmap", "jmapUrl": url, "jmapToken": token}
-    print("Checking the token...")
+    print(fe._t("setup.checkingToken", "Checking the token..."))
     result = fe.fetch_jmap_calendar(entry, *window())
     if result["status"] != "ok":
-        raise RuntimeError(f"The server did not accept it: {result['status']}")
-    print(f"Works: {result['count']} events in the next weeks.")
+        raise RuntimeError(fe._t("setup.jmapRejected", "The server did not accept it: {status}", status=result['status']))
+    print(fe._t("setup.works", "Works: {count} events in the next weeks.", count=result['count']))
     return [entry]
 
 
 def setup_ics():
     open_guide("ics")
-    url = ask("Calendar link (https://, webcal:// or .ics)")
-    name = ask("Name", "Calendar")
+    url = ask(fe._t("setup.calendarLinkPrompt", "Calendar link (https://, webcal:// or .ics)"))
+    name = ask(fe._t("setup.namePrompt", "Name"), fe._t("common.defaultCalendarName", "Calendar"))
     entry = {"name": name, "url": url}
-    print("Fetching it once to check...")
+    print(fe._t("setup.fetchingOnce", "Fetching it once to check..."))
     result = fe.fetch_calendar(entry, *window())
     if result["status"] != "ok":
-        raise RuntimeError(f"That link did not work: {result['status']}")
-    print(f"Works: {result['count']} events in the next weeks.")
+        raise RuntimeError(fe._t("setup.icalRejected", "That link did not work: {status}", status=result['status']))
+    print(fe._t("setup.works", "Works: {count} events in the next weeks.", count=result['count']))
     return [entry]
 
 
 def setup_local():
-    return [{"name": ask("Name", "Local"), "type": "local", "color": "#a6e3a1"}]
+    return [{"name": ask(fe._t("setup.namePrompt", "Name"), fe._t("setup.localNameDefault", "Local")), "type": "local", "color": "#a6e3a1"}]
 
 
 PROVIDERS = [
-    ("google", "Google Calendar", "read & write, needs your own Google app (~5 min)", setup_google),
-    ("icloud", "Apple iCloud", "read & write, app-specific password", setup_icloud),
-    ("jmap", "Fastmail / JMAP", "read & write, API token", setup_jmap),
-    ("caldav", "Nextcloud / CalDAV", "read & write, app password", setup_caldav),
-    ("ics", "Any .ics link", "read only: Proton, Outlook, Google secret address", setup_ics),
-    ("local", "Local calendar", "offline, stays on this machine", setup_local),
+    ("google", fe._t("setup.providerGoogleTitle", "Google Calendar"),
+     fe._t("setup.providerGoogleDetail", "read & write, needs your own Google app (~5 min)"), setup_google),
+    ("icloud", fe._t("setup.providerIcloudTitle", "Apple iCloud"),
+     fe._t("setup.providerIcloudDetail", "read & write, app-specific password"), setup_icloud),
+    ("jmap", fe._t("setup.providerJmapTitle", "Fastmail / JMAP"),
+     fe._t("setup.providerJmapDetail", "read & write, API token"), setup_jmap),
+    ("caldav", fe._t("setup.providerCaldavTitle", "Nextcloud / CalDAV"),
+     fe._t("setup.providerCaldavDetail", "read & write, app password"), setup_caldav),
+    ("ics", fe._t("setup.providerIcsTitle", "Any .ics link"),
+     fe._t("setup.providerIcsDetail", "read only: Proton, Outlook, Google secret address"), setup_ics),
+    ("local", fe._t("setup.providerLocalTitle", "Local calendar"),
+     fe._t("setup.providerLocalDetail", "offline, stays on this machine"), setup_local),
 ]
 
 
 def main():
     arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
     saved = False
-    print("Chronica setup: connect a calendar\n")
+    print(fe._t("setup.title", "Chronica setup: connect a calendar") + "\n")
     try:
         if arg == "reconnect":
             entries = reconnect_google()
@@ -286,26 +294,27 @@ def main():
             if not match:
                 for i, (_, title, detail, _) in enumerate(PROVIDERS, 1):
                     print(f"  {i}  {title:<20} {detail}")
-                choice = parse_pick(input("\nWhich one? ").strip() or "x", len(PROVIDERS))
+                choice = parse_pick(input("\n" + fe._t("setup.whichOne", "Which one? ")).strip() or "x", len(PROVIDERS))
                 if not choice or len(choice) != 1:
-                    print("Nothing chosen.")
+                    print(fe._t("setup.nothingChosen", "Nothing chosen."))
                     return 1
                 match = [PROVIDERS[choice[0]]]
             entries = match[0][3]()
         if entries:
             save(entries)
             saved = True
-        print("Syncing...")
+        print(fe._t("setup.syncing", "Syncing..."))
         fe.sync_in_child()
-        print("\nDone. Your calendar panel will update in a moment.")
+        print("\n" + fe._t("setup.done", "Done. Your calendar panel will update in a moment."))
         return 0
     except (KeyboardInterrupt, EOFError):
         # A Google sign-in may already be stored; only the calendar list is known untouched.
-        print("\nCancelled." if saved else "\nCancelled, no calendars were added.")
+        print("\n" + (fe._t("setup.cancelled", "Cancelled.") if saved
+                      else fe._t("setup.cancelledNoCalendars", "Cancelled, no calendars were added.")))
         return 1
     except Exception as exc:
-        print(f"\nSetup failed: {exc}")
-        print(f"Help for each step: {GUIDE}")
+        print("\n" + fe._t("setup.failed", "Setup failed: {error}", error=exc))
+        print(fe._t("setup.helpLine", "Help for each step: {url}", url=GUIDE))
         return 1
 
 
@@ -313,7 +322,7 @@ if __name__ == "__main__":
     code = main()
     if sys.stdin.isatty():
         try:
-            input("\nPress Enter to close.")
+            input("\n" + fe._t("setup.pressEnterToClose", "Press Enter to close."))
         except (KeyboardInterrupt, EOFError):
             pass
     sys.exit(code)

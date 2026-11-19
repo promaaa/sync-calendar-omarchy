@@ -10,6 +10,8 @@ Item {
   visible: false
 
   property string script: ""
+  // The panel hands in its tr(); the default keeps Backend usable on its own.
+  property var translate: function(key, fallback) { return typeof fallback === "string" ? fallback : key }
   property int nextId: 1
   // id -> { cmd, done }, for calls sent and not answered yet.
   property var pending: ({})
@@ -78,7 +80,7 @@ Item {
     }
     onRunningChanged: {
       if (running) return
-      backend.failAll("The calendar backend stopped; it restarts by itself.")
+      backend.failAll(backend.translate("backend.stopped", "The calendar backend stopped; it restarts by itself."))
       restartTimer.interval = backend.restartDelay
       // Back off up to a minute when it keeps failing (no python3, a crash).
       backend.restartDelay = Math.min(60000, backend.restartDelay * 2)

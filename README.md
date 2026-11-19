@@ -196,6 +196,17 @@ An entry with `"translateKorean": true` sends the title and location of its
 Korean events to Google Translate (`translate.googleapis.com`) and shows the
 English result. It is off by default. Leave it off for a private calendar.
 
+**Settings > Preferences > Translate Korean Titles** turns the same
+translation on for every calendar at once. It is off by default too.
+
+### Languages
+
+The panel, its messages and the guided setup follow the language picked
+under Omarchy's **Setup > Language**. Strings live in flat JSON catalogs,
+one per language code (`i18n/de.json`, ...); a string missing from a catalog
+falls back to the English text in the code, so a language can be added one
+file at a time. Quick add understands English, French and German phrases.
+
 ## Connecting a Calendar
 
 Open the panel's **Settings (`󰒓`)** and click **`󰐕`**. A terminal opens with a short guided setup:

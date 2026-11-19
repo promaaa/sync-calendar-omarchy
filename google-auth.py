@@ -50,6 +50,8 @@ backend = _load_backend()
 safe_read_bytes = backend.safe_read_bytes
 safe_load_json = backend.safe_load_json
 write_secure_json = backend.write_secure_json
+# Display strings follow the backend's UI language; English stays the fallback.
+_t = backend._t
 
 
 class OAuthCallbackHandler(BaseHTTPRequestHandler):
@@ -67,12 +69,13 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.send_response(400)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
-            html = """
+            failed_title = _t("auth.pageFailedTitle", "Authentication Failed")
+            html = f"""
             <html>
-            <head><title>Authentication Failed</title></head>
+            <head><title>{failed_title}</title></head>
             <body style="font-family: sans-serif; text-align: center; padding: 50px; background: #181825; color: #cdd6f4;">
-                <h1 style="color: #f38ba8;">Authentication Failed</h1>
-                <p>Invalid or missing OAuth state parameter (CSRF validation failed).</p>
+                <h1 style="color: #f38ba8;">{failed_title}</h1>
+                <p>{_t("auth.pageBadState", "Invalid or missing OAuth state parameter (CSRF validation failed).")}</p>
             </body>
             </html>
             """
@@ -84,13 +87,13 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
-            html = """
+            html = f"""
             <html>
-            <head><title>Omarchy Calendar Auth</title></head>
+            <head><title>{_t("auth.pageSuccessTitle", "Omarchy Calendar Auth")}</title></head>
             <body style="font-family: sans-serif; text-align: center; padding: 50px; background: #181825; color: #cdd6f4;">
-                <h1 style="color: #a6e3a1;">&#10004; Authentication Successful!</h1>
-                <p>You have successfully authenticated your Google account with Omarchy.</p>
-                <p>You can close this tab and return to the desktop.</p>
+                <h1 style="color: #a6e3a1;">{_t("auth.pageSuccessHeading", "✔ Authentication Successful!")}</h1>
+                <p>{_t("auth.pageSuccessBody", "You have successfully authenticated your Google account with Omarchy.")}</p>
+                <p>{_t("auth.pageSuccessClose", "You can close this tab and return to the desktop.")}</p>
             </body>
             </html>
             """
@@ -98,15 +101,15 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         else:
             # The state matched, so this is Google's answer: stop waiting.
             auth_failed = True
-            error = html_escape(params.get("error", ["Unknown error"])[0])
+            error = html_escape(params.get("error", [_t("auth.unknownError", "Unknown error")])[0])
             self.send_response(400)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             html = f"""
             <html>
             <body style="font-family: sans-serif; text-align: center; padding: 50px; background: #181825; color: #cdd6f4;">
-                <h1 style="color: #f38ba8;">Authentication Failed</h1>
-                <p>Error: {error}</p>
+                <h1 style="color: #f38ba8;">{_t("auth.pageFailedTitle", "Authentication Failed")}</h1>
+                <p>{_t("auth.pageError", "Error: {error}", error=error)}</p>
             </body>
             </html>
             """
@@ -201,14 +204,14 @@ def authorize(client_id, client_secret):
     server = HTTPServer(("127.0.0.1", PORT), OAuthCallbackHandler)
     server.timeout = 600
     try:
-        print("Opening your browser to sign in to Google.")
-        print("If nothing opens, visit:")
+        print(_t("auth.browserOpening", "Opening your browser to sign in to Google."))
+        print(_t("auth.ifNothingOpens", "If nothing opens, visit:"))
         print(auth_url)
         print()
-        print('If Google says it "hasn\'t verified this app", that is your own app:')
-        print("click Advanced, then Go to <your app name>, then Continue.")
+        print(_t("auth.unverifiedApp", 'If Google says it "hasn\'t verified this app", that is your own app:'))
+        print(_t("auth.advancedSteps", "click Advanced, then Go to <your app name>, then Continue."))
         webbrowser.open(auth_url)
-        print("Waiting for you to finish in the browser (10 minutes max)...")
+        print(_t("auth.waitingBrowser", "Waiting for you to finish in the browser (10 minutes max)..."))
         deadline = time.monotonic() + server.timeout
         while not auth_code and not auth_failed and time.monotonic() < deadline:
             server.timeout = max(1, deadline - time.monotonic())
@@ -217,15 +220,15 @@ def authorize(client_id, client_secret):
         server.server_close()
 
     if not auth_code:
-        raise RuntimeError("Sign-in timed out or was cancelled.")
+        raise RuntimeError(_t("auth.timeout", "Sign-in timed out or was cancelled."))
 
     try:
         tokens = exchange_code_for_tokens(client_id, client_secret, auth_code, code_verifier)
     except Exception as e:
-        raise RuntimeError(f"Failed to exchange tokens: {e}") from e
+        raise RuntimeError(_t("auth.tokenExchangeFailed", "Failed to exchange tokens: {error}", error=e)) from e
     refresh_token = tokens.get("refresh_token") or existing_auth.get("refresh_token")
     if not refresh_token:
-        raise RuntimeError("No refresh token returned. Remove the app's access in your Google Account and try again.")
+        raise RuntimeError(_t("auth.noRefreshToken", "No refresh token returned. Remove the app's access in your Google Account and try again."))
 
     auth_data = {
         "client_id": client_id,
@@ -253,25 +256,25 @@ def main():
         found = find_downloaded_client()
         if found:
             client_id, client_secret, fname = found
-            print(f"Found and loaded Google OAuth credentials from: ~/Downloads/{fname}")
+            print(_t("auth.foundCredentials", "Found and loaded Google OAuth credentials from: ~/Downloads/{filename}", filename=fname))
 
     if not client_id or not client_secret:
-        print("No Google client saved yet. Run the guided setup instead:")
+        print(_t("auth.noClientSaved", "No Google client saved yet. Run the guided setup instead:"))
         print(f"  python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'setup.py')}")
         sys.exit(1)
 
     try:
         authorize(client_id, client_secret)
     except RuntimeError as e:
-        print("Error:", e)
+        print(_t("auth.errorPrefix", "Error: {message}", message=e))
         sys.exit(1)
-    print("\nSUCCESS! Google OAuth credentials saved to:")
+    print("\n" + _t("auth.successHeadline", "SUCCESS! Google OAuth credentials saved to:"))
     print(f"  {AUTH_FILE}")
     print()
-    print("Tip: if this login stops working after about 7 days, your OAuth app is")
-    print("still in 'Testing' publishing status. In Google Cloud Console open")
-    print("Google Auth Platform -> Audience and click 'Publish app' (In production).")
-    print("Refresh tokens then stop expiring and you will not need to sign in again.")
+    print(_t("auth.tipLine1", "Tip: if this login stops working after about 7 days, your OAuth app is"))
+    print(_t("auth.tipLine2", "still in 'Testing' publishing status. In Google Cloud Console open"))
+    print(_t("auth.tipLine3", "Google Auth Platform -> Audience and click 'Publish app' (In production)."))
+    print(_t("auth.tipLine4", "Refresh tokens then stop expiring and you will not need to sign in again."))
 
 
 if __name__ == "__main__":

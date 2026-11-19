@@ -214,6 +214,14 @@ test("Model.upcomingEvents flattens days with one heading each", () => {
   assert.deepEqual(home.map((e) => [e.id, e.dayHeading]), [["b", "2026-10-06"], ["c", "2026-10-08"]]);
 });
 
+test("Model.parseQuickAdd understands German dates and times", () => {
+  const today = "2026-10-06"; // a Tuesday
+  const q = (text) => Model.parseQuickAdd(text, today);
+  assert.deepEqual(q("Mittagessen morgen 13-14 Uhr"), { title: "Mittagessen", date: "2026-10-07", start: "13:00", end: "14:00" });
+  assert.deepEqual(q("Zahnarzt Freitag um 9:30"), { title: "Zahnarzt", date: "2026-10-09", start: "09:30", end: "10:30" });
+  assert.deepEqual(q("Meeting übermorgen 10 Uhr"), { title: "Meeting", date: "2026-10-08", start: "10:00", end: "11:00" });
+});
+
 test("Model.parseQuickAdd understands dates and times in English and French", () => {
   const today = "2026-10-06"; // a Tuesday
   const q = (text) => Model.parseQuickAdd(text, today);

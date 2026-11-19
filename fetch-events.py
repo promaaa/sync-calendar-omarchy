@@ -47,6 +47,15 @@ WEEKDAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
 
 _translation_cache = {}
 
+# Korean event titles only go to translate.googleapis.com when the user has
+# switched that on: for every calendar with the panel's preference (passed in
+# as CHRONICA_TRANSLATE_KOREAN=1), or per calendar with "translateKorean".
+TRANSLATE_KOREAN = os.environ.get("CHRONICA_TRANSLATE_KOREAN") == "1"
+
+
+def korean_translation_enabled(cal_info):
+    return TRANSLATE_KOREAN or bool(cal_info.get("translateKorean", False))
+
 MAX_ICAL_BYTES = 10 * 1024 * 1024   # 10 MB limit for calendar .ics content
 MAX_API_BYTES = 5 * 1024 * 1024     # 5 MB limit for API JSON responses
 MAX_CONFIG_BYTES = 1 * 1024 * 1024  # 1 MB limit for local config files
@@ -218,6 +227,49 @@ def write_secure_json(path, data, mode=0o600, max_bytes=MAX_CONFIG_BYTES):
             except FileNotFoundError:
                 pass
         os.close(dir_fd)
+
+
+# ---- UI language. Only display text is translated: log lines, JSON keys and
+#      IPC commands stay English, and a missing file means English.
+I18N_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "i18n")
+
+
+def _ui_lang():
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        value = os.environ.get(name, "")
+        if value:
+            value = value.split("_")[0].split(".")[0].split("@")[0].lower()
+            return "en" if value in ("", "c", "posix") else value
+    return "en"
+
+
+_i18n_cache = None
+
+
+def _t(key, fallback, **kwargs):
+    global _i18n_cache
+    lang = _ui_lang()
+    if lang == "en":
+        text = fallback
+    else:
+        if not isinstance(_i18n_cache, tuple) or _i18n_cache[0] != lang:
+            table = {}
+            try:
+                data = safe_load_json(os.path.join(I18N_DIR, lang + ".json"), max_bytes=MAX_CONFIG_BYTES)
+                table = data if isinstance(data, dict) else {}
+            except Exception:
+                table = {}
+            _i18n_cache = (lang, table)
+        text = _i18n_cache[1].get(key)
+        if not isinstance(text, str):
+            text = fallback
+    try:
+        return text.format(**kwargs)
+    except (KeyError, ValueError, IndexError):
+        try:
+            return fallback.format(**kwargs)
+        except (KeyError, ValueError, IndexError):
+            return fallback
 
 
 def load_translation_cache():
@@ -1306,7 +1358,7 @@ def _parse_ics(content, cal_info, window_start, window_end):
                     _, ex_dt = parse_datetime_value(ex_val, ex_params)
                     current["exdates"].append(ex_dt.strftime("%Y-%m-%d"))
 
-    auto_translate = cal_info.get("translateKorean", False)
+    auto_translate = korean_translation_enabled(cal_info)
     # A subscription feed is read-only; the same calendar becomes writable as
     # soon as the entry also carries CalDAV credentials for the collection.
     can_write = has_caldav_write(cal_info)
@@ -1837,7 +1889,7 @@ def fetch_google_api_calendar(cal_info, window_start, window_end):
 
         # Shared calendars can be read-only for this account.
         writable = (data.get("accessRole") or "owner") in ("owner", "writer")
-        auto_translate = cal_info.get("translateKorean", False)
+        auto_translate = korean_translation_enabled(cal_info)
         events = []
 
         for item in items:
@@ -2240,7 +2292,7 @@ def fetch_jmap_calendar(cal_info, window_start, window_end):
         sync_cache_save(cache_path, cached)
 
         # Step 3: Parse JSCalendar (RFC 8984) events
-        auto_translate = cal_info.get("translateKorean", False)
+        auto_translate = korean_translation_enabled(cal_info)
         events = []
 
         for item in raw_events:
@@ -2521,10 +2573,10 @@ def validate_event_times(event_data):
         if raw:
             parsed[key] = parse_local_timestamp(raw)
             if parsed[key] is None:
-                raise ValueError(f"Invalid event {key} '{raw}': use a time like 14:30 or 2:30pm")
+                raise ValueError(_t("fetch.invalidEventTime", "Invalid event {field} '{value}': use a time like 14:30 or 2:30pm", field=key, value=raw))
     if (not event_data.get("allDay") and parsed.get("start") is not None
             and parsed.get("end") is not None and parsed["end"] <= parsed["start"]):
-        raise ValueError("The end time must be after the start time")
+        raise ValueError(_t("panel.errorEndBeforeStart", "The end time must be after the start time"))
 
 
 def fetch_local_calendar(cal_info, window_start, window_end):
@@ -2536,7 +2588,7 @@ def fetch_local_calendar(cal_info, window_start, window_end):
         if not isinstance(raw_events, list):
             raw_events = []
 
-        auto_translate = cal_info.get("translateKorean", False)
+        auto_translate = korean_translation_enabled(cal_info)
         events = []
 
         for item in raw_events:
@@ -2620,7 +2672,7 @@ def create_local_event(cal_info, event_data):
     if not isinstance(events, list):
         events = []
 
-    title = str(event_data.get("title", "")).strip() or "(Untitled Event)"
+    title = str(event_data.get("title", "")).strip() or ("(" + _t("model.untitledEvent", "Untitled Event") + ")")
     location = str(event_data.get("location", "")).strip()
     description = str(event_data.get("description", "")).strip()
     all_day = bool(event_data.get("allDay", False))
@@ -2628,7 +2680,7 @@ def create_local_event(cal_info, event_data):
     end_str = str(event_data.get("end", "")).strip()
 
     if not start_str:
-        raise ValueError("Event must have a start date/time")
+        raise ValueError(_t("fetch.eventNoStart", "Event must have a start date/time"))
 
     event_id = f"loc_{int(time.time())}_{secrets.token_hex(4)}"
     new_evt = {
@@ -2655,7 +2707,7 @@ def delete_local_event(cal_info, event_id):
 
     filtered = [e for e in events if str(e.get("id")) != str(event_id)]
     if len(filtered) == len(events):
-        return {"status": "error", "message": f"Event '{event_id}' not found in local calendar"}
+        return {"status": "error", "message": _t("fetch.eventNotFoundLocal", "Event '{id}' not found in local calendar", id=event_id)}
 
     write_secure_json(LOCAL_EVENTS_PATH, filtered, mode=0o600, max_bytes=MAX_OUTPUT_JSON_BYTES)
     return {"status": "success", "id": event_id}
@@ -2669,7 +2721,7 @@ def update_local_event(cal_info, event_id, event_data):
 
     start_str = str(event_data.get("start", "")).strip()
     if not start_str:
-        raise ValueError("Event must have a start date/time")
+        raise ValueError(_t("fetch.eventNoStart", "Event must have a start date/time"))
 
     for evt in events:
         if isinstance(evt, dict) and str(evt.get("id")) == str(event_id):
@@ -2685,31 +2737,32 @@ def update_local_event(cal_info, event_id, event_data):
             write_secure_json(LOCAL_EVENTS_PATH, events, mode=0o600, max_bytes=MAX_OUTPUT_JSON_BYTES)
             return {"status": "success", "id": event_id, "event": evt}
 
-    return {"status": "error", "message": f"Event '{event_id}' not found in local calendar"}
+    return {"status": "error", "message": _t("fetch.eventNotFoundLocal", "Event '{id}' not found in local calendar", id=event_id)}
 
 
 def google_events_url(cal_info):
     """Events collection URL of a configured Google calendar plus a fresh access token."""
     cal_id = cal_info.get("googleCalendarId") or cal_info.get("calendarId")
     if not cal_id:
-        raise ValueError("Google calendar has no calendar ID configured")
+        raise ValueError(_t("fetch.googleNoCalendarId", "Google calendar has no calendar ID configured"))
 
     access_token = get_google_access_token()
     if not access_token:
         auth_state = _LAST_GOOGLE_AUTH["state"]
         if auth_state == "revoked":
-            raise ValueError("Google login expired or revoked: reconnect Google in Settings")
+            raise ValueError(_t("fetch.googleRevoked", "Google login expired or revoked: reconnect Google in Settings"))
         if auth_state == "error":
-            raise ValueError(f"Google token refresh failed: {_LAST_GOOGLE_AUTH['detail']}")
-        raise ValueError("Google authentication required: connect Google with + in Settings")
+            raise ValueError(_t("fetch.googleRefreshFailed", "Google token refresh failed: {detail}", detail=_LAST_GOOGLE_AUTH['detail']))
+        raise ValueError(_t("fetch.googleAuthRequired", "Google authentication required: connect Google with + in Settings"))
 
     encoded_cal_id = urllib.parse.quote(cal_id, safe="")
     return f"https://www.googleapis.com/calendar/v3/calendars/{encoded_cal_id}/events", access_token
 
 
-GOOGLE_READONLY_HINT = (
+GOOGLE_READONLY_HINT = _t(
+    "fetch.googleReadOnly",
     "Google only granted read access to this calendar. Reconnect Google "
-    "(the key button next to it in Settings) to allow adding and deleting events."
+    "(the key button next to it in Settings) to allow adding and deleting events.",
 )
 
 
@@ -2736,7 +2789,7 @@ def google_request(method, url, access_token, body=None):
         reasons = {e.get("reason") for e in err.get("errors", []) if isinstance(e, dict)}
         if "insufficientPermissions" in reasons:
             raise ValueError(GOOGLE_READONLY_HINT) from exc
-        raise ValueError(f"Google refused the change: {err.get('message') or 'HTTP 403'}") from exc
+        raise ValueError(_t("fetch.googleRefused", "Google refused the change: {message}", message=err.get('message') or 'HTTP 403')) from exc
     return json.loads(raw.decode("utf-8")) if raw.strip() else {}
 
 
@@ -2756,7 +2809,7 @@ def google_event_body(event_data, patch=False):
     start_val = str(event_data.get("start", "")).strip()
     end_val = str(event_data.get("end", "")).strip()
     if not start_val:
-        raise ValueError("Event must have a start date/time")
+        raise ValueError(_t("fetch.eventNoStart", "Event must have a start date/time"))
 
     body = {"summary": title}
     if description or patch:
@@ -2832,7 +2885,7 @@ def jmap_session(cal_info, cached=None):
     """
     token = (cal_info.get("jmapToken") or cal_info.get("token") or cal_info.get("bearerToken") or "").strip()
     if not token:
-        raise ValueError("No JMAP bearer token configured")
+        raise ValueError(_t("fetch.jmapNoToken", "No JMAP bearer token configured"))
     session_url, trusted_origin = validate_jmap_https_url(jmap_session_url(cal_info))
     opener = urllib.request.build_opener(JmapSameOriginRedirectHandler(trusted_origin))
     headers = {
@@ -2855,7 +2908,7 @@ def jmap_session(cal_info, cached=None):
 
     api_url = session_data.get("apiUrl")
     if not api_url:
-        raise ValueError("no apiUrl in JMAP session response")
+        raise ValueError(_t("fetch.jmapNoApiUrl", "no apiUrl in JMAP session response"))
     api_url, _ = validate_jmap_https_url(api_url, trusted_origin)
 
     accounts = session_data.get("accounts", {})
@@ -2870,7 +2923,7 @@ def jmap_session(cal_info, cached=None):
     if not account_id and accounts:
         account_id = next(iter(accounts.keys()))
     if not account_id:
-        raise ValueError("no JMAP calendar account found")
+        raise ValueError(_t("fetch.jmapNoAccount", "no JMAP calendar account found"))
 
     # At most 16 short capability names: the list goes into every request,
     # and the server decides how many it offers.
@@ -2912,12 +2965,12 @@ def jmap_default_calendar(session):
     calendars = []
     for name, args, _ in data.get("methodResponses", []):
         if name == "error":
-            raise ValueError(f"JMAP error: {args.get('type')}")
+            raise ValueError(_t("fetch.jmapError", "JMAP error: {type}", type=args.get('type')))
         if name == "Calendar/get":
             calendars = args.get("list", [])
     writable = [c for c in calendars if (c.get("myRights") or {}).get("mayWriteOwn", True)]
     if not writable:
-        raise ValueError("No writable JMAP calendar found on this account")
+        raise ValueError(_t("fetch.jmapNoWritable", "No writable JMAP calendar found on this account"))
     return sorted(writable, key=lambda c: not c.get("isDefault"))[0]["id"]
 
 
@@ -2941,7 +2994,7 @@ def jmap_event_set(session, call_id, **changes):
         if resp_name == "CalendarEvent/set":
             return resp_args
         if resp_name == "error":
-            raise ValueError(f"JMAP error: {resp_args.get('type')}")
+            raise ValueError(_t("fetch.jmapError", "JMAP error: {type}", type=resp_args.get('type')))
     return {}
 
 
@@ -2962,7 +3015,7 @@ def jmap_event_fields(event_data):
     start_val = str(event_data.get("start", "")).strip()
     end_val = str(event_data.get("end", "")).strip()
     if not start_val:
-        raise ValueError("Event must have a start date/time")
+        raise ValueError(_t("fetch.eventNoStart", "Event must have a start date/time"))
 
     fields = {
         "title": title,
@@ -3006,7 +3059,7 @@ def create_jmap_event(cal_info, event_data):
         created_evt = result["created"][creation_id]
         return {"status": "success", "id": created_evt.get("id"), "event": created_evt}
     if creation_id in result.get("notCreated", {}):
-        raise ValueError(f"JMAP event creation rejected: {jmap_set_error(result['notCreated'][creation_id])}")
+        raise ValueError(_t("fetch.jmapCreateRejected", "JMAP event creation rejected: {reason}", reason=jmap_set_error(result['notCreated'][creation_id])))
     return {"status": "success", "id": creation_id}
 
 
@@ -3016,7 +3069,7 @@ def update_jmap_event(cal_info, event_id, event_data):
     event_id = str(event_id)
     result = jmap_event_set(session, "upd0", update={event_id: jmap_event_fields(event_data)})
     if event_id in result.get("notUpdated", {}):
-        raise ValueError(f"JMAP event update rejected: {jmap_set_error(result['notUpdated'][event_id])}")
+        raise ValueError(_t("fetch.jmapUpdateRejected", "JMAP event update rejected: {reason}", reason=jmap_set_error(result['notUpdated'][event_id])))
     return {"status": "success", "id": event_id}
 
 
@@ -3026,7 +3079,7 @@ def delete_jmap_event(cal_info, event_id):
     event_id = str(event_id)
     result = jmap_event_set(session, "del0", destroy=[event_id])
     if event_id in result.get("notDestroyed", {}):
-        raise ValueError(f"JMAP event deletion rejected: {jmap_set_error(result['notDestroyed'][event_id])}")
+        raise ValueError(_t("fetch.jmapDeleteRejected", "JMAP event deletion rejected: {reason}", reason=jmap_set_error(result['notDestroyed'][event_id])))
     return {"status": "success", "id": event_id}
 
 
@@ -3058,14 +3111,16 @@ def caldav_auth(cal_info, raw_url):
     user = str(cal_info.get("username") or "").strip()
     password = str(cal_info.get("password") or "")
     if not user or not password:
-        raise ValueError(
-            f"Calendar '{cal_info.get('name')}' has no CalDAV credentials: set "
-            '"username" and "password" on it to push events.'
-        )
+        raise ValueError(_t(
+            "fetch.caldavNoCredentials",
+            "Calendar '{name}' has no CalDAV credentials: set "
+            '"username" and "password" on it to push events.',
+            name=cal_info.get('name'),
+        ))
     # Basic auth is one header line, and ":" separates its two halves, so a
     # crafted config must not be able to smuggle either past the boundary.
     if ":" in user or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in user + password):
-        raise ValueError("CalDAV username or password contains an invalid character")
+        raise ValueError(_t("fetch.caldavInvalidChars", "CalDAV username or password contains an invalid character"))
 
     url = str(raw_url or "").strip()
     if "://" not in url:
@@ -3081,10 +3136,12 @@ def caldav_credentials(cal_info):
     """Same as caldav_auth, against the configured collection URL."""
     raw_url = str(cal_info.get("caldavUrl") or "").strip()
     if not raw_url:
-        raise ValueError(
-            f"Calendar '{cal_info.get('name')}' is a read-only subscription feed. "
-            'Set "caldavUrl" (run --caldav-discover to list yours) to push events to it.'
-        )
+        raise ValueError(_t(
+            "fetch.caldavNoCollectionUrl",
+            "Calendar '{name}' is a read-only subscription feed. "
+            'Set "caldavUrl" (run --caldav-discover to list yours) to push events to it.',
+            name=cal_info.get('name'),
+        ))
     return caldav_auth(cal_info, raw_url)
 
 
@@ -3095,7 +3152,7 @@ def parse_server_xml(text):
     WebDAV never needs one.
     """
     if re.search(r"<!(DOCTYPE|ENTITY)", text, re.IGNORECASE):
-        raise ValueError("The server's XML answer has a DTD, which is refused")
+        raise ValueError(_t("fetch.xmlDtdRefused", "The server's XML answer has a DTD, which is refused"))
     return ET.fromstring(text)
 
 
@@ -3120,13 +3177,14 @@ def caldav_error(exc, cal_info):
     """Turn an HTTP failure into something a panel user can act on."""
     name = cal_info.get("name", "CalDAV calendar")
     if exc.code in (401, 403):
-        return (f"{name} rejected the credentials. Apple iCloud needs an app-specific "
-                "password from appleid.apple.com, not your Apple ID password.")
+        return _t("fetch.caldavAuthRejected",
+                  "{name} rejected the credentials. Apple iCloud needs an app-specific "
+                  "password from appleid.apple.com, not your Apple ID password.", name=name)
     if exc.code == 404:
-        return f'{name}: CalDAV collection not found - check "caldavUrl".'
+        return _t("fetch.caldavNotFound", '{name}: CalDAV collection not found - check "caldavUrl".', name=name)
     if exc.code == 507:
-        return f"{name}: the server has no storage left for this calendar."
-    return f"{name}: CalDAV server returned HTTP {exc.code}."
+        return _t("fetch.caldavNoStorage", "{name}: the server has no storage left for this calendar.", name=name)
+    return _t("fetch.caldavHttp", "{name}: CalDAV server returned HTTP {status}.", name=name, status=exc.code)
 
 
 def ics_escape(value):
@@ -3230,7 +3288,7 @@ def rewrite_vevent(ics_text, event_data):
     """Apply the form fields to an existing single-VEVENT calendar object."""
     lines = unfold_lines(ics_text)
     if sum(1 for line in lines if line.strip().upper() == "BEGIN:VEVENT") != 1:
-        raise ValueError("Recurring events with exceptions cannot be edited from the panel yet")
+        raise ValueError(_t("fetch.recurringExceptions", "Recurring events with exceptions cannot be edited from the panel yet"))
 
     out = []
     depth = 0  # 1 directly inside the VEVENT, deeper inside its VALARMs
@@ -3251,7 +3309,7 @@ def rewrite_vevent(ics_text, event_data):
         elif depth == 1:
             name = ics_prop_name(line)
             if name in VEVENT_RECURRENCE_PROPS:
-                raise ValueError("Recurring events cannot be edited from the panel yet")
+                raise ValueError(_t("fetch.recurringNotEditable", "Recurring events cannot be edited from the panel yet"))
             if name == "SEQUENCE":
                 sequence = safe_int_param(line.split(":", 1)[-1], 0)
             if name in VEVENT_EDITED_PROPS:
@@ -3263,7 +3321,7 @@ def rewrite_vevent(ics_text, event_data):
 def create_caldav_event(cal_info, event_data):
     """Create an event on a CalDAV collection (Apple iCloud, Nextcloud, ...)."""
     if not str(event_data.get("start", "")).strip():
-        raise ValueError("Event must have a start date/time")
+        raise ValueError(_t("fetch.eventNoStart", "Event must have a start date/time"))
 
     url, origin, auth = caldav_credentials(cal_info)
     uid = f"omarchy-{int(time.time())}-{secrets.token_hex(8)}"
@@ -3415,7 +3473,7 @@ def delete_caldav_event(cal_info, event_id):
     found = caldav_find_href(url, origin, auth, event_id)
     if not found:
         name = cal_info.get("name", "the CalDAV calendar")
-        return {"status": "error", "message": f"Event '{event_id}' not found on {name}"}
+        return {"status": "error", "message": _t("fetch.eventNotFoundOnCalendar", "Event '{id}' not found on {calendar}", id=event_id, calendar=name)}
     try:
         caldav_request(origin, auth, "DELETE", found)
     except urllib.error.HTTPError as exc:
@@ -3440,7 +3498,7 @@ def update_caldav_event(cal_info, event_id, event_data):
                 raise
             href = caldav_find_href(url, origin, auth, event_id)
             if not href:
-                return {"status": "error", "message": f"Event '{event_id}' not found on {name}"}
+                return {"status": "error", "message": _t("fetch.eventNotFoundOnCalendar", "Event '{id}' not found on {calendar}", id=event_id, calendar=name)}
             current, etag = caldav_request(origin, auth, "GET", href)
 
         headers = {"Content-Type": "text/calendar; charset=utf-8"}
@@ -3449,7 +3507,7 @@ def update_caldav_event(cal_info, event_id, event_data):
         caldav_request(origin, auth, "PUT", href, rewrite_vevent(current, event_data), headers=headers)
     except urllib.error.HTTPError as exc:
         if exc.code == 412:
-            raise ValueError(f"{name}: the event was changed elsewhere meanwhile. Refresh and edit again.") from exc
+            raise ValueError(_t("fetch.eventChangedElsewhere", "{calendar}: the event was changed elsewhere meanwhile. Refresh and edit again.", calendar=name)) from exc
         raise ValueError(caldav_error(exc, cal_info)) from exc
     return {"status": "success", "id": event_id}
 
@@ -3561,7 +3619,7 @@ def create_event(event_data):
         "google": create_google_event,
     }.get(kind)
     if creator is None:
-        raise ValueError(f"Calendar '{cal_info.get('name')}' is a read-only subscription feed and does not accept push events.")
+        raise ValueError(_t("fetch.readOnlyFeedPush", "Calendar '{name}' is a read-only subscription feed and does not accept push events.", name=cal_info.get('name')))
     res = creator(cal_info, event_data)
 
     sync_all_events()
@@ -3572,7 +3630,7 @@ def resolve_event_target(data, action):
     """Event id, calendar entry and backend type for an edit or delete payload."""
     event_id = data.get("id")
     if not event_id:
-        raise ValueError(f"Missing event ID for {action}")
+        raise ValueError(_t("fetch.missingEventId", "Missing event ID for {action}", action=action))
 
     cal_target = data.get("calendar") or data.get("calendarId") or data.get("calendarType") or "local"
     cal_type = str(data.get("calendarType", "")).lower()
@@ -3584,7 +3642,7 @@ def resolve_event_target(data, action):
     if str(event_id).startswith("loc_") or str(event_id).startswith("local_"):
         cal_type = "local"
     if cal_type not in ("local", "jmap", "caldav", "google"):
-        raise ValueError(f"Calendar '{cal_target}' does not support event {action} (read-only feed).")
+        raise ValueError(_t("fetch.unsupportedEventAction", "Calendar '{calendar}' does not support event {action} (read-only feed).", calendar=cal_target, action=action))
     return event_id, cal_info, cal_type
 
 
@@ -3728,7 +3786,7 @@ def sync_all_events():
                     if isinstance(res, dict):
                         all_events.extend(res.get("events", []))
                         cal_statuses.append({
-                            "name": res.get("name", "Calendar"),
+                            "name": res.get("name", _t("common.defaultCalendarName", "Calendar")),
                             "color": res.get("color", "#4A90E2"),
                             "type": res.get("type", "ical"),
                             "writable": bool(res.get("writable", False)),
@@ -3793,8 +3851,8 @@ def sync_all_events():
 
         entry = {
             "id": str(evt.get("id", "")),
-            "title": str(evt.get("title") or "(Untitled Event)"),
-            "calendar": str(evt.get("calendar") or "Calendar"),
+            "title": str(evt.get("title") or ("(" + _t("model.untitledEvent", "Untitled Event") + ")")),
+            "calendar": str(evt.get("calendar") or _t("common.defaultCalendarName", "Calendar")),
             "calendarId": str(evt.get("calendarId", "")),
             "calendarType": str(evt.get("calendarType", "ical")),
             "writable": writable,
@@ -3879,13 +3937,14 @@ def read_stdin_payload(max_bytes=MAX_CONFIG_BYTES):
 
 def save_config_command(new_config):
     if not isinstance(new_config, list):
-        raise ValueError("Config must be a JSON array of calendar entries")
+        raise ValueError(_t("fetch.configNotArray", "Config must be a JSON array of calendar entries"))
     save_calendars(new_config)
     return {"status": "success"}
 
 
 SERVE_COMMANDS = {
-    "sync": lambda payload: sync_in_child(),
+    "sync": lambda payload: sync_in_child(
+        translate_korean=(payload.get("translateKorean") is True) if isinstance(payload, dict) else False),
     "save-config": save_config_command,
     "create-event": lambda payload: event_in_child("--create-event", payload),
     "update-event": lambda payload: event_in_child("--update-event", payload),
@@ -3898,7 +3957,7 @@ SYNC_DEADLINE_SECONDS = 120
 MAX_SERVE_REPLY_CHARS = MAX_CONFIG_BYTES
 
 
-def sync_in_child(deadline=SYNC_DEADLINE_SECONDS):
+def sync_in_child(deadline=SYNC_DEADLINE_SECONDS, translate_korean=False):
     """
     Run one sync as a child process and kill it at the deadline. A thread
     cannot be stopped, so a feed that keeps the parser busy would otherwise
@@ -3908,7 +3967,8 @@ def sync_in_child(deadline=SYNC_DEADLINE_SECONDS):
     """
     try:
         proc = subprocess.run([sys.executable, os.path.abspath(__file__)], stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=deadline, check=False)
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=deadline, check=False,
+                              env=dict(os.environ, CHRONICA_TRANSLATE_KOREAN="1" if translate_korean else "0"))
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": f"Sync stopped after {deadline} s"}
     return {"status": "success" if proc.returncode == 0 else "error"}
@@ -3925,21 +3985,24 @@ def event_in_child(flag, payload, deadline=EVENT_DEADLINE_SECONDS):
     file and is read up to MAX_SERVE_REPLY_CHARS.
     """
     if not isinstance(payload, dict):
-        raise ValueError("Payload must be a JSON object")
+        raise ValueError(_t("fetch.payloadNotObject", "Payload must be a JSON object"))
+    payload = dict(payload)
+    translate_korean = payload.pop("translateKorean", None) is True
     with tempfile.TemporaryFile() as out:
         try:
             subprocess.run([sys.executable, os.path.abspath(__file__), flag],
                            input=(json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"),
-                           stdout=out, stderr=subprocess.DEVNULL, timeout=deadline, check=False)
+                           stdout=out, stderr=subprocess.DEVNULL, timeout=deadline, check=False,
+                           env=dict(os.environ, CHRONICA_TRANSLATE_KOREAN="1" if translate_korean else "0"))
         except subprocess.TimeoutExpired:
-            return {"status": "error", "message": f"The calendar did not answer within {deadline} s"}
+            return {"status": "error", "message": _t("fetch.calendarTimeout", "The calendar did not answer within {seconds} s", seconds=deadline)}
         out.seek(0)
         raw = out.read(MAX_SERVE_REPLY_CHARS + 1)
     try:
         result = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_SERVE_REPLY_CHARS else None
     except ValueError:
         result = None
-    return result if isinstance(result, dict) else {"status": "error", "message": "No answer from the calendar backend"}
+    return result if isinstance(result, dict) else {"status": "error", "message": _t("fetch.noAnswerBackend", "No answer from the calendar backend")}
 
 
 def serve(stdin=None, stdout=None):
@@ -3961,14 +4024,14 @@ def serve(stdin=None, stdout=None):
         req_id = None
         try:
             if len(line) > MAX_CONFIG_BYTES:
-                raise ValueError(f"Request exceeds maximum size of {MAX_CONFIG_BYTES} bytes")
+                raise ValueError(_t("fetch.requestTooLarge", "Request exceeds maximum size of {bytes} bytes", bytes=MAX_CONFIG_BYTES))
             request = json.loads(line)
             if not isinstance(request, dict):
-                raise ValueError("Request must be a JSON object")
+                raise ValueError(_t("fetch.requestNotObject", "Request must be a JSON object"))
             req_id = request.get("id")
             handler = SERVE_COMMANDS.get(request.get("cmd"))
             if handler is None:
-                raise ValueError(f"Unknown command {request.get('cmd')!r}")
+                raise ValueError(_t("fetch.unknownCommand", "Unknown command {command}", command=repr(request.get('cmd'))))
             result = handler(request.get("payload"))
         except Exception as e:
             result = {"status": "error", "message": str(e)}
@@ -3978,7 +4041,7 @@ def serve(stdin=None, stdout=None):
             result["message"] = result["message"][:MAX_FIELD_CHARS]
         reply = json.dumps({"id": req_id, "result": result}, ensure_ascii=False)
         if len(reply) > MAX_SERVE_REPLY_CHARS:
-            reply = json.dumps({"id": req_id, "result": {"status": "error", "message": "The answer was too large"}})
+            reply = json.dumps({"id": req_id, "result": {"status": "error", "message": _t("fetch.answerTooLarge", "The answer was too large")}})
         stdout.write(reply + "\n")
         stdout.flush()
 

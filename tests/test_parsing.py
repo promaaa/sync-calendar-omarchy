@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 import tempfile
@@ -15,6 +16,8 @@ spec.loader.exec_module(fetch_events)
 # a test must never write to the desktop keyring.
 fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
 fetch_events._secret_tool = lambda args, value=None: None
+# The backend speaks the desktop's language; the assertions below are English.
+fetch_events._ui_lang = lambda: "en"
 
 WINDOW = (datetime(2026, 9, 1), datetime(2026, 9, 30))
 
@@ -189,6 +192,22 @@ class EventFormValidationTests(unittest.TestCase):
 
     def test_all_day_same_date_is_accepted(self):
         fetch_events.validate_event_times({"start": "2026-09-10", "end": "2026-09-10", "allDay": True})
+
+
+class KoreanTranslationTests(unittest.TestCase):
+    def test_off_unless_the_panel_or_the_calendar_enables_it(self):
+        # Reload the backend with CHRONICA_TRANSLATE_KOREAN unset, as on a
+        # default install: no calendar sends its titles to Google.
+        env = {k: v for k, v in os.environ.items() if k != "CHRONICA_TRANSLATE_KOREAN"}
+        spec = importlib.util.spec_from_file_location("fetch_events_untranslated", ROOT / "fetch-events.py")
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, env, clear=True):
+            spec.loader.exec_module(module)
+        self.assertFalse(module.TRANSLATE_KOREAN)
+        self.assertFalse(module.korean_translation_enabled({"name": "Work"}))
+        self.assertTrue(module.korean_translation_enabled({"name": "Work", "translateKorean": True}))
+        module.TRANSLATE_KOREAN = True
+        self.assertTrue(module.korean_translation_enabled({"name": "Work"}))
 
 
 if __name__ == "__main__":

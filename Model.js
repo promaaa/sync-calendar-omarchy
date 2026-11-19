@@ -3,6 +3,32 @@
 // (tests/test_model.js); the QML owns month/weekday naming through
 // Qt.locale().
 
+// ---- Translations. Call sites keep their English text as the fallback; a
+//      missing key or a missing table leaves it in place.
+var _strings = {}
+
+function setStrings(table) {
+  _strings = (table && typeof table === "object") ? table : {}
+}
+
+// Pure: looks `key` up in `table` and fills {name} holes from `args`.
+function translate(table, key, fallback, args) {
+  var source = (table && typeof table === "object") ? table : {}
+  var text = source[key]
+  if (typeof text !== "string") text = fallback
+  if (typeof text !== "string") return ""
+  if (args && typeof args === "object") {
+    text = text.replace(/\{([^{}]+)\}/g, function(match, name) {
+      return Object.prototype.hasOwnProperty.call(args, name) ? String(args[name]) : match
+    })
+  }
+  return text
+}
+
+function tr(key, fallback, args) {
+  return translate(_strings, key, fallback, args)
+}
+
 var MS_PER_DAY = 86400000
 
 // Weekday indices match both JS Date.getDay() and QML's Locale.Sunday…
@@ -393,9 +419,9 @@ function parseEventsFile(text) {
   }
 }
 
-function formatSelectedDateLabel(dateKeyStr, todayKeyStr, locale) {
-  if (!dateKeyStr) return "TODAY"
-  if (dateKeyStr === todayKeyStr) return "TODAY"
+function formatSelectedDateLabel(dateKeyStr, todayKeyStr, locale, table) {
+  if (!dateKeyStr) return translate(table, "model.today", "TODAY")
+  if (dateKeyStr === todayKeyStr) return translate(table, "model.today", "TODAY")
   var parts = dateKeyStr.split("-")
   if (parts.length !== 3) return dateKeyStr
   var y = parseInt(parts[0], 10)
@@ -404,7 +430,7 @@ function formatSelectedDateLabel(dateKeyStr, todayKeyStr, locale) {
   var dt = new Date(y, m, d)
   var dayName = (locale && typeof locale.dayName === "function") ? locale.dayName(dt.getDay(), 1) : WEEKDAY_NAMES[dt.getDay()]
   var monthName = (locale && typeof locale.monthName === "function") ? locale.monthName(dt.getMonth(), 1) : ("" + (m + 1))
-  return (dayName + ", " + monthName + " " + d).toUpperCase()
+  return translate(table, "fmt.dayLabel", "{dayName}, {monthName} {day}", { dayName: dayName, monthName: monthName, day: d }).toUpperCase()
 }
 
 var CALENDAR_COLORS = [
@@ -441,7 +467,7 @@ function parseCalendarsConfig(text) {
 // per calendar as an "auth_expired:" / "auth_required:" status; this pairs
 // those statuses with the configured Google API calendars so the panel can
 // say what happened and offer a reconnect instead of showing an empty day.
-function googleAuthIssue(configuredList, activeList) {
+function googleAuthIssue(configuredList, activeList, table) {
   var configured = configuredList || []
   var googleNames = {}
   var hasGoogleApi = false
@@ -464,23 +490,23 @@ function googleAuthIssue(configuredList, activeList) {
     if (status.indexOf("auth_expired") === 0) thisKind = "expired"
     else if (status.indexOf("auth_required") === 0) thisKind = "required"
     if (!thisKind) continue
-    names.push(String(a.name || "Google Calendar"))
+    names.push(String(a.name || translate(table, "model.defaultGoogleCalendar", "Google Calendar")))
     if (kind !== "expired") kind = thisKind
   }
   if (!kind) return null
   return { kind: kind, names: names }
 }
 
-function googleAuthIssueText(issue) {
+function googleAuthIssueText(issue, table) {
   if (!issue) return ""
-  var who = issue.names.length > 0 ? issue.names.join(", ") : "Google Calendar"
-  if (issue.kind === "expired") return "Google login expired for " + who + ". Click to reconnect."
-  return who + " needs a Google login. Click to connect."
+  var who = issue.names.length > 0 ? issue.names.join(", ") : translate(table, "model.defaultGoogleCalendar", "Google Calendar")
+  if (issue.kind === "expired") return translate(table, "model.googleExpired", "Google login expired for {names}. Click to reconnect.", { names: who })
+  return translate(table, "model.googleRequired", "{names} needs a Google login. Click to connect.", { names: who })
 }
 
-function formatAgendaMarkdown(events, selectedDateLabel, calendarName, hourCycle) {
+function formatAgendaMarkdown(events, selectedDateLabel, calendarName, hourCycle, table) {
   if (!events || events.length === 0) return ""
-  var header = "### Agenda – " + (selectedDateLabel || "Today")
+  var header = translate(table, "model.agendaHeading", "### Agenda – {date}", { date: selectedDateLabel || translate(table, "model.agendaToday", "Today") })
   if (calendarName && calendarName !== "all") {
     header += " (" + calendarName + ")"
   }
@@ -490,8 +516,8 @@ function formatAgendaMarkdown(events, selectedDateLabel, calendarName, hourCycle
     if (!evt) continue
     var startTime = formatEventTime(evt.startTime, hourCycle)
     var endTime = formatEventTime(evt.endTime, hourCycle)
-    var timeStr = evt.allDay ? "All Day" : (startTime + (endTime ? " – " + endTime : ""))
-    var line = "- [ ] " + timeStr + " · " + (evt.title || "Untitled Event")
+    var timeStr = evt.allDay ? translate(table, "model.allDay", "All Day") : (startTime + (endTime ? " – " + endTime : ""))
+    var line = "- [ ] " + timeStr + " · " + (evt.title || translate(table, "model.untitledEvent", "Untitled Event"))
     if (evt.meetingProvider && evt.meetingUrl) {
       line += " ([" + evt.meetingProvider + "](" + evt.meetingUrl + "))"
     } else if (evt.location) {
@@ -502,7 +528,7 @@ function formatAgendaMarkdown(events, selectedDateLabel, calendarName, hourCycle
   return lines.join("\n")
 }
 
-function getWritableCalendars(configuredList) {
+function getWritableCalendars(configuredList, table) {
   var list = configuredList || []
   var writables = []
   var hasLocal = false
@@ -513,7 +539,7 @@ function getWritableCalendars(configuredList) {
     if (type === "local") {
       hasLocal = true
       writables.push({
-        name: c.name || "Local Calendar",
+        name: c.name || translate(table, "common.defaultLocalCalendar", "Local Calendar"),
         type: "local",
         color: c.color || "#a6e3a1",
         calendarId: "local",
@@ -529,7 +555,7 @@ function getWritableCalendars(configuredList) {
       })
     } else if (c.caldavUrl && c.username && c.password) {
       writables.push({
-        name: c.name || "CalDAV Calendar",
+        name: c.name || translate(table, "model.defaultCaldavCalendar", "CalDAV Calendar"),
         type: "caldav",
         color: c.color || "#4A90E2",
         calendarId: c.caldavUrl,
@@ -537,7 +563,7 @@ function getWritableCalendars(configuredList) {
       })
     } else if (c.googleCalendarId || (c.calendarId && !c.url)) {
       writables.push({
-        name: c.name || "Google Calendar",
+        name: c.name || translate(table, "model.defaultGoogleCalendar", "Google Calendar"),
         type: "google",
         color: c.color || "#4285f4",
         calendarId: c.googleCalendarId || c.calendarId,
@@ -547,7 +573,7 @@ function getWritableCalendars(configuredList) {
   }
   if (!hasLocal) {
     writables.push({
-      name: "Local Calendar",
+      name: translate(table, "common.defaultLocalCalendar", "Local Calendar"),
       type: "local",
       color: "#a6e3a1",
       calendarId: "local",
@@ -630,8 +656,8 @@ function dueNotifications(events, nowMs, noticeSetting, sentKeys) {
     due.push({
       key: key,
       start: startMs,
-      title: diffMin <= 1 ? "An event starts now" : "An event starts in " + diffMin + " minutes",
-      body: "Open the calendar in the bar to see it."
+      title: diffMin <= 1 ? tr("model.notificationNow", "An event starts now") : tr("model.notificationSoon", "An event starts in {minutes} minutes", { minutes: diffMin }),
+      body: tr("model.notificationBody", "Open the calendar in the bar to see it.")
     })
   }
   return due
@@ -643,7 +669,7 @@ function dueNotifications(events, nowMs, noticeSetting, sentKeys) {
 function reminderSummary(due) {
   if (!due || due.length === 0) return null
   if (due.length === 1) return { title: due[0].title, body: due[0].body }
-  return { title: due.length + " events start soon", body: "Open the calendar in the bar to see them." }
+  return { title: tr("model.reminderSummaryTitle", "{count} events start soon", { count: due.length }), body: tr("model.reminderSummaryBody", "Open the calendar in the bar to see them.") }
 }
 
 // The events of `days` days from `fromKey`, in date order, as one flat list.
@@ -665,31 +691,35 @@ function upcomingEvents(eventsByDate, fromKey, days, keep) {
 }
 
 // Quick add: "Lunch tomorrow 1pm", "Standup mon 9:30-9:45", "Dentiste
-// demain 14h", "Call friday at 3pm for 30m", "Review 2026-10-12".
+// demain 14h", "Call friday at 3pm for 30m", "Review 2026-10-12",
+// "Mittagessen morgen 13-14 Uhr".
 // Returns { title, date, start, end }: date "YYYY-MM-DD" or "", times
 // "HH:MM" or "". Words it does not understand stay in the title.
 var QUICK_DAY_OFFSETS = {
   "today": 0, "tonight": 0, "aujourd'hui": 0, "ce soir": 0,
-  "tomorrow": 1, "tmrw": 1, "demain": 1, "après-demain": 2, "apres-demain": 2
+  "tomorrow": 1, "tmrw": 1, "demain": 1, "après-demain": 2, "apres-demain": 2,
+  "heute": 0, "heute abend": 0, "heute nacht": 0, "morgen": 1, "morgen früh": 1,
+  "morgen abend": 1, "übermorgen": 2, "uebermorgen": 2
 }
 // Full names only: "Sam" or "sun" in a title must not move the event.
 var QUICK_WEEKDAYS = {
   "sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3, "thursday": 4, "friday": 5, "saturday": 6,
-  "dimanche": 0, "lundi": 1, "mardi": 2, "mercredi": 3, "jeudi": 4, "vendredi": 5, "samedi": 6
+  "dimanche": 0, "lundi": 1, "mardi": 2, "mercredi": 3, "jeudi": 4, "vendredi": 5, "samedi": 6,
+  "sonntag": 0, "montag": 1, "dienstag": 2, "mittwoch": 3, "donnerstag": 4, "freitag": 5, "samstag": 6, "sonnabend": 6
 }
-var QUICK_TIME = "(\\d{1,2}(?:[:.h]\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.|h)?)"
+var QUICK_TIME = "(\\d{1,2}(?:[:.h]\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.|uhr|h)?)"
 
 function quickTime(token, meridiemHint) {
   var t = String(token || "").toLowerCase().replace(/\s+/g, "").replace(/\./g, function(m, i, str) {
     return /\d/.test(str.charAt(i - 1)) && /\d/.test(str.charAt(i + 1)) ? ":" : ""
   })
-  t = t.replace(/h(\d{2})$/, ":$1").replace(/h$/, "")
+  t = t.replace(/h(\d{2})$/, ":$1").replace(/h$/, "").replace(/uhr$/, "")
   if (meridiemHint && !/[ap]m?$/.test(t)) t += meridiemHint
   return parseTimeInput(t)
 }
 
 function hasTimeMarker(token) {
-  return /[:.h]|am|pm|a\.m|p\.m/i.test(String(token || ""))
+  return /[:.h]|am|pm|a\.m|p\.m|uhr/i.test(String(token || ""))
 }
 
 function addMinutes(hhmm, minutes) {
@@ -709,7 +739,7 @@ function parseQuickAdd(text, todayKey) {
   var todayDow = new Date(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10))).getUTCDay()
 
   // Times: a range first ("1-2pm", "9:30-10:15", "13h-14h30"), then one time.
-  take(new RegExp("\\s(?:at |à |@ ?)?" + QUICK_TIME + "\\s*(?:-|–|to|à)\\s*" + QUICK_TIME + "(?=\\s)", "i"), function(m) {
+  take(new RegExp("\\s(?:at |à |um |von |@ ?)?" + QUICK_TIME + "\\s*(?:-|–|to|à|bis)\\s*" + QUICK_TIME + "(?=\\s)", "i"), function(m) {
     if (!hasTimeMarker(m[1]) && !hasTimeMarker(m[2])) return false
     var hint = (/(am|pm)\s*$/i.exec(m[2]) || [])[1]
     var start = quickTime(m[1], hint && !/(am|pm)/i.test(m[1]) ? hint.toLowerCase() : "")
@@ -719,7 +749,7 @@ function parseQuickAdd(text, todayKey) {
     result.end = end
   })
   if (!result.start) {
-    take(new RegExp("\\s(?:(at |à |@ ?)" + QUICK_TIME + "|" + QUICK_TIME + ")(?=\\s)", "i"), function(m) {
+    take(new RegExp("\\s(?:(at |à |um |von |@ ?)" + QUICK_TIME + "|" + QUICK_TIME + ")(?=\\s)", "i"), function(m) {
       var token = m[2] || m[3]
       if (!m[1] && !hasTimeMarker(token)) return false
       var start = quickTime(token)
@@ -729,9 +759,9 @@ function parseQuickAdd(text, todayKey) {
   }
   if (result.start && !result.end) {
     var minutes = 60
-    take(/\s(?:for|pendant) (\d+(?:[.,]\d+)?) ?(h|hours?|hrs?|heures?|m|mins?|minutes?)(?=\s)/i, function(m) {
+    take(/\s(?:for|pendant|für|fuer) (\d+(?:[.,]\d+)?) ?(h|std|stunden?|hours?|hrs?|heures?|m|min|mins?|minutes?)(?=\s)/i, function(m) {
       var n = parseFloat(m[1].replace(",", "."))
-      minutes = Math.round(/^h/i.test(m[2]) ? n * 60 : n)
+      minutes = Math.round(/^(?:h|std|stunden?)/i.test(m[2]) ? n * 60 : n)
     })
     result.end = addMinutes(result.start, Math.max(1, minutes))
     // The form edits one day: an event late in the evening ends at midnight.
@@ -745,7 +775,7 @@ function parseQuickAdd(text, todayKey) {
     result.date = d
   })
   if (!result.date) {
-    take(/\s(?:in|dans) (\d{1,3}) (?:days?|jours?)(?=\s)/i, function(m) {
+    take(/\s(?:in|dans) (\d{1,3}) (?:tagen|tage|tag|days?|jours?)(?=\s)/i, function(m) {
       result.date = stepDate(today, parseInt(m[1], 10)).dateKey
     })
   }
@@ -756,14 +786,14 @@ function parseQuickAdd(text, todayKey) {
     })
   }
   if (!result.date) {
-    take(new RegExp("\\s(?:(next|prochain) |on |le )?(" + Object.keys(QUICK_WEEKDAYS).join("|") + ")( prochain)?(?=\\s)", "i"), function(m) {
+    take(new RegExp("\\s(?:(next|prochain|nächsten|nächster|nächste|naechsten) |on |le |am )?(" + Object.keys(QUICK_WEEKDAYS).join("|") + ")( prochain| nächste woche)?(?=\\s)", "i"), function(m) {
       var ahead = (QUICK_WEEKDAYS[m[2].toLowerCase()] - todayDow + 7) % 7
       if (ahead === 0 && (m[1] || m[3])) ahead = 7
       result.date = stepDate(today, ahead).dateKey
     })
   }
 
-  result.title = rest.replace(/\s(?:at|à|on|le)\s*$/i, " ").replace(/\s+/g, " ").trim()
+  result.title = rest.replace(/\s(?:at|à|on|le|um|am|von)\s*$/i, " ").replace(/\s+/g, " ").trim()
   return result
 }
 
@@ -779,6 +809,9 @@ function calculateEndTime(startTimeStr, durationMinutes) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    setStrings: setStrings,
+    translate: translate,
+    tr: tr,
     dateKey: dateKey,
     keyForDate: keyForDate,
     normalizedWeekStart: normalizedWeekStart,

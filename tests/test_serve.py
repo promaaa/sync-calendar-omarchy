@@ -14,6 +14,8 @@ spec.loader.exec_module(fetch_events)
 # a test must never write to the desktop keyring.
 fetch_events.SYNC_CACHE_DIR = tempfile.mkdtemp(prefix="chronica-test-cache-")
 fetch_events._secret_tool = lambda args, value=None: None
+# The backend speaks the desktop's language; the assertions below are English.
+fetch_events._ui_lang = lambda: "en"
 
 
 class ServeTests(unittest.TestCase):

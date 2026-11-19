@@ -46,16 +46,21 @@ Panel {
   property var eventsData: Model.parseEventsFile(eventsFile.text())
   readonly property var eventsByDate: eventsData.eventsByDate || ({})
   readonly property var selectedEvents: eventsByDate[selectedDateKey] || []
-  readonly property string selectedDateLabel: Model.formatSelectedDateLabel(selectedDateKey, todayKey, Qt.locale(), root.i18nStrings)
+  readonly property string selectedDateLabel: Model.formatSelectedDateLabel(selectedDateKey, todayKey, root.formatLocale, root.i18nStrings)
   readonly property int configuredCalendarCount: eventsData.configuredCount || 0
   property double lastSyncTimestamp: 0
   readonly property bool syncRunning: backend.syncRunning
   readonly property string backendScript: Qt.resolvedUrl("fetch-events.py").toString().replace(/^file:\/\//, "")
   // ---- Translations. English stays in the code as each call's fallback; a
   //      language without a file leaves every string exactly as it is.
-  property var i18nStrings: ({})
-  readonly property string pluginDir: root.backendScript.substring(0, root.backendScript.lastIndexOf("/"))
-  readonly property string uiLanguage: Qt.locale().name.split("_")[0]
+  // Strings follow the language picked under Setup > Language, like the
+  // shell's own; i18n/<code>.json holds them, English stays in the code.
+  Translations { id: i18nCatalog; directory: Qt.resolvedUrl("i18n") }
+  readonly property var i18nStrings: i18nCatalog.strings
+  onI18nStringsChanged: Model.setStrings(root.i18nStrings)
+  Component.onCompleted: Model.setStrings(root.i18nStrings)
+  // Dates and weekday names in the same language's format.
+  readonly property var formatLocale: Qt.locale(I18n.formatLocale)
   function tr(key, fallback, args) {
     var table = root.i18nStrings
     return Model.translate(table, key, fallback, args)
@@ -477,8 +482,8 @@ Panel {
   // starts out matching the rest of the desktop rather than a hardcoded
   // convention. Clicking the grid's "W" heading writes the choice back to
   // shell.json.
-  readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), Qt.locale().firstDayOfWeek)
-  readonly property string nextWeekStartLabel: Qt.locale().dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
+  readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), root.formatLocale.firstDayOfWeek)
+  readonly property string nextWeekStartLabel: root.formatLocale.dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey)
 
@@ -760,7 +765,7 @@ Panel {
   // Locale short day names, trimmed of the trailing period some locales
   // carry ("man." -> "MAN") so the header row stays a clean band of caps.
   function weekdayLabel(weekday) {
-    return String(Qt.locale().dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
+    return String(root.formatLocale.dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
   }
 
   FileView {
@@ -780,22 +785,6 @@ Panel {
     watchChanges: true
     printErrors: false
     onFileChanged: root.syncCalendars(true)
-  }
-
-  // English, or a language without a file, keeps everything in the code.
-  FileView {
-    id: i18nFile
-    path: root.pluginDir + "/i18n/" + root.uiLanguage + ".json"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      var table = ({})
-      try { table = JSON.parse(text()) } catch (e) { table = ({}) }
-      if (!table || typeof table !== "object" || Array.isArray(table)) table = ({})
-      root.i18nStrings = table
-      Model.setStrings(table)
-    }
   }
 
   // One long-lived backend process runs every call in turn, so two writes
@@ -996,7 +985,7 @@ Panel {
                 textFormat: Text.PlainText
                 id: heroDate
                 anchors.verticalCenter: parent.verticalCenter
-                text: Qt.formatDate(root.today, root.tr("fmt.monthDay", "MMMM d"))
+                text: root.today.toLocaleDateString(root.formatLocale, root.tr("fmt.monthDay", "MMMM d"))
                 color: heroMouse.containsMouse
                   ? Style.hoverStateColor(root.contentForeground, Color.accent)
                   : root.contentForeground
@@ -1460,7 +1449,7 @@ Panel {
                 // "MAY 2026" and a "SEPTEMBER 2026".
                 width: Style.space(130)
                 horizontalAlignment: Text.AlignHCenter
-                text: Qt.formatDate(root.viewDate, root.tr("fmt.monthYear", "MMMM yyyy")).toUpperCase()
+                text: root.viewDate.toLocaleDateString(root.formatLocale, root.tr("fmt.monthYear", "MMMM yyyy")).toUpperCase()
                 color: Qt.darker(root.contentForeground, 1.4)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -2371,7 +2360,7 @@ Panel {
                     visible: Boolean(modelData.dayHeading)
                     topPadding: Style.space(4)
                     textFormat: Text.PlainText
-                    text: visible ? Model.formatSelectedDateLabel(modelData.dayHeading, root.todayKey, Qt.locale(), root.i18nStrings) : ""
+                    text: visible ? Model.formatSelectedDateLabel(modelData.dayHeading, root.todayKey, root.formatLocale, root.i18nStrings) : ""
                     color: Qt.darker(root.contentForeground, 1.4)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption

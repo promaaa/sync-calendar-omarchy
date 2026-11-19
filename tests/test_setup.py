@@ -21,6 +21,7 @@ def load_script(name, filename):
 # The wizard speaks the desktop's language, and module-level strings such as
 # GOOGLE_READONLY_HINT are built at import; the assertions below are English.
 os.environ["LC_ALL"] = "C"
+os.environ["OMARCHY_LANGUAGE_FILE"] = os.devnull
 
 setup = load_script("chronica_setup", "setup.py")
 fetch_events = setup.fe

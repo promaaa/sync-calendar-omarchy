@@ -234,7 +234,21 @@ def write_secure_json(path, data, mode=0o600, max_bytes=MAX_CONFIG_BYTES):
 I18N_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "i18n")
 
 
+LANGUAGE_CODE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")
+
+
 def _ui_lang():
+    # The language picked under Omarchy's Setup > Language, as the panel uses;
+    # the process locale only when that file is missing.
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    path = os.environ.get("OMARCHY_LANGUAGE_FILE") or os.path.join(config_home, "omarchy", "language")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            code = f.read(64).strip()
+        if LANGUAGE_CODE.match(code):
+            return code
+    except OSError:
+        pass
     for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
         value = os.environ.get(name, "")
         if value:
@@ -255,8 +269,11 @@ def _t(key, fallback, **kwargs):
         if not isinstance(_i18n_cache, tuple) or _i18n_cache[0] != lang:
             table = {}
             try:
-                data = safe_load_json(os.path.join(I18N_DIR, lang + ".json"), max_bytes=MAX_CONFIG_BYTES)
-                table = data if isinstance(data, dict) else {}
+                for code in dict.fromkeys((lang, lang.split("-")[0])):
+                    data = safe_load_json(os.path.join(I18N_DIR, code + ".json"), max_bytes=MAX_CONFIG_BYTES)
+                    if isinstance(data, dict):
+                        table = data
+                        break
             except Exception:
                 table = {}
             _i18n_cache = (lang, table)
